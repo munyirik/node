@@ -19,9 +19,13 @@
 // IN THE SOFTWARE.
 
 #include "v8chakra.h"
-#include "chakra_natives.h"
 #include <algorithm>
 #include <memory>
+
+namespace v8 {
+  extern bool g_trace_debug_json;
+  extern THREAD_LOCAL JsSourceContext currentContext;
+}
 
 namespace jsrt {
 
@@ -34,10 +38,18 @@ ContextShim::Scope::~Scope() {
 }
 
 ContextShim * ContextShim::New(IsolateShim * isolateShim, bool exposeGC,
+                               bool useGlobalTTState,
                                JsValueRef globalObjectTemplateInstance) {
+  JsRuntimeHandle handle = isolateShim->GetRuntimeHandle();
   JsContextRef context;
-  if (JsCreateContext(isolateShim->GetRuntimeHandle(), &context) != JsNoError) {
+  if (useGlobalTTState) {
+    if (JsTTDCreateContext(handle, useGlobalTTState, &context) != JsNoError) {
+      return nullptr;
+    }
+  } else {
+  if (JsCreateContext(handle, &context) != JsNoError) {
     return nullptr;
+    }
   }
 
   // AddRef on globalObjectTemplateInstance if specified. Save and use later.
@@ -60,6 +72,7 @@ ContextShim::ContextShim(IsolateShim * isolateShim,
       context(context),
       initialized(false),
       exposeGC(exposeGC),
+      globalObjectTemplateInstance(globalObjectTemplateInstance),
       trueRef(JS_INVALID_REFERENCE),
       falseRef(JS_INVALID_REFERENCE),
       undefinedRef(JS_INVALID_REFERENCE),
@@ -67,7 +80,6 @@ ContextShim::ContextShim(IsolateShim * isolateShim,
       zero(JS_INVALID_REFERENCE),
       globalObject(JS_INVALID_REFERENCE),
       proxyOfGlobal(JS_INVALID_REFERENCE),
-      globalObjectTemplateInstance(globalObjectTemplateInstance),
       promiseContinuationFunction(JS_INVALID_REFERENCE),
 #include "jsrtcachedpropertyidref.inc"
 #undef DEF_IS_TYPE
@@ -86,7 +98,8 @@ ContextShim::ContextShim(IsolateShim * isolateShim,
       ensureDebugFunction(JS_INVALID_REFERENCE),
       enqueueMicrotaskFunction(JS_INVALID_REFERENCE),
       dequeueMicrotaskFunction(JS_INVALID_REFERENCE),
-      getPropertyAttributesFunction(JS_INVALID_REFERENCE) {
+      getPropertyAttributesFunction(JS_INVALID_REFERENCE),
+      getOwnPropertyNamesFunction(JS_INVALID_REFERENCE) {
   memset(globalConstructor, 0, sizeof(globalConstructor));
   memset(globalPrototypeFunction, 0, sizeof(globalPrototypeFunction));
 }
@@ -159,21 +172,25 @@ bool ContextShim::InitializeBuiltIn(JsValueRef * builtInValue, Fn getBuiltIn) {
     return false;
   }
   *builtInValue = value;
+
+  // TTD_NODE
+  JsAddRef(*builtInValue, nullptr);
+
   return true;
 }
 
 bool ContextShim::InitializeBuiltIn(JsValueRef * builtInValue,
-                                    const wchar_t* globalName) {
+                                    const char* globalName) {
   return InitializeBuiltIn(builtInValue,
                            [=](JsValueRef * value) {
     return jsrt::GetProperty(globalObject, globalName, value);
   });
 }
 
-static const wchar_t* s_globalTypeNames[] = {
-#define DEFTYPE(T) L#T,
+static const char* s_globalTypeNames[] = {
+#define DEFTYPE(T) #T,
 #include "jsrtcontextcachedobj.inc"
-  L""
+  ""
 };
 
 bool ContextShim::InitializeGlobalTypes() {
@@ -213,12 +230,12 @@ bool ContextShim::InitializeGlobalPrototypeFunctions() {
 
   const TypeMethodPair pairs[GlobalPrototypeFunction::_FunctionCount] = {
 #define DEFMETHOD(T, M) { \
-    GlobalType::##T, \
-    iso->GetCachedPropertyIdRef(CachedPropertyIdRef::##M) },
+    GlobalType::T, \
+    iso->GetCachedPropertyIdRef(CachedPropertyIdRef::M) },
 #include "jsrtcontextcachedobj.inc"
   };
 
-  for (int i = 0; i < _countof(pairs); i++) {
+  for (size_t i = 0; i < _countof(pairs); i++) {
     if (!init(static_cast<GlobalPrototypeFunction>(i),
               pairs[i].type, pairs[i].functionIdRef)) {
       return false;
@@ -271,6 +288,10 @@ bool ContextShim::InitializeBuiltIns() {
     return false;
   }
   keepAliveObject = newKeepAliveObject;
+
+  // TTD_NODE
+  JsAddRef(keepAliveObject, nullptr);
+
   // true and false is needed by DefineProperty to create the property
   // descriptor
   if (!InitializeBuiltIn(&trueRef, JsGetTrueValue)) {
@@ -319,7 +340,7 @@ bool ContextShim::InitializeBuiltIns() {
   return true;
 }
 
-static JsValueRef CALLBACK ProxyOfGlobalGetPrototypeOfCallback(
+static JsValueRef CHAKRA_CALLBACK ProxyOfGlobalGetPrototypeOfCallback(
     JsValueRef callee,
     bool isConstructCall,
     JsValueRef *arguments,
@@ -410,7 +431,7 @@ bool ContextShim::ExposeGc() {
     return false;
   }
 
-  if (jsrt::SetPropertyOfGlobal(L"gc", collectGarbageRef) != JsNoError) {
+  if (jsrt::SetPropertyOfGlobal("gc", collectGarbageRef) != JsNoError) {
     return false;
   }
 
@@ -418,22 +439,13 @@ bool ContextShim::ExposeGc() {
 }
 
 bool ContextShim::ExecuteChakraShimJS() {
-  wchar_t buffer[_countof(chakra_shim_native) + 1];
-
-  if (StringConvert::CopyRaw<unsigned char, wchar_t>(chakra_shim_native,
-      _countof(chakra_shim_native),
-      buffer,
-      _countof(chakra_shim_native)) != JsNoError) {
-    return false;
-  }
-
-  // Ensure the buffer is null terminated
-  buffer[_countof(chakra_shim_native)] = L'\0';
-
   JsValueRef getInitFunction;
-  if (JsParseScript(buffer,
-                    JS_SOURCE_CONTEXT_NONE,
-                    L"chakra_shim.js",
+  JsValueRef url;
+  jsrt::CreateString("chakra_shim.js", &url);
+  if (JsParse(GetIsolateShim()->GetChakraShimJsArrayBuffer(),
+                    v8::currentContext++,
+                    url,
+                    JsParseScriptAttributeNone,
                     &getInitFunction) != JsNoError) {
     return false;
   }
@@ -445,6 +457,69 @@ bool ContextShim::ExecuteChakraShimJS() {
   JsValueRef arguments[] = { this->globalObject, this->keepAliveObject };
   return JsCallFunction(initFunction, arguments, _countof(arguments),
                         &result) == JsNoError;
+}
+
+bool ContextShim::ExecuteChakraDebugShimJS(JsValueRef * chakraDebugObject) {
+  JsValueRef getInitFunction;
+  JsValueRef url;
+  jsrt::CreateString("chakra_debug.js", &url);
+  if (JsParse(GetIsolateShim()->GetChakraDebugShimJsArrayBuffer(),
+    v8::currentContext++,
+    url,
+    JsParseScriptAttributeNone,
+    &getInitFunction) != JsNoError) {
+    return false;
+  }
+
+  JsValueRef initFunction;
+  if (CallFunction(getInitFunction, &initFunction) != JsNoError) {
+    return false;
+  }
+
+  JsValueRef traceDebugJsonRef;
+  JsBoolToBoolean(v8::g_trace_debug_json, &traceDebugJsonRef);
+
+  JsValueRef arguments[] = { this->globalObject, this->globalObject,
+      this->keepAliveObject, traceDebugJsonRef };
+
+  JsErrorCode errorCode = JsCallFunction(initFunction, arguments,
+      _countof(arguments), chakraDebugObject);
+
+  CHAKRA_VERIFY_NOERROR(errorCode);
+
+  return true;
+}
+
+bool ContextShim::ExecuteChakraInspectorShimJS(
+  JsValueRef * chakraDebugObject) {
+  JsValueRef getInitFunction;
+  JsValueRef url;
+  jsrt::CreateString("chakra_inspector.js", &url);
+  if (JsParse(GetIsolateShim()->GetChakraInspectorShimJsArrayBuffer(),
+    v8::currentContext++,
+    url,
+    JsParseScriptAttributeNone,
+    &getInitFunction) != JsNoError) {
+    return false;
+  }
+
+  JsValueRef initFunction;
+  if (CallFunction(getInitFunction, &initFunction) != JsNoError) {
+    return false;
+  }
+
+  JsValueRef traceDebugJsonRef;
+  JsBoolToBoolean(v8::g_trace_debug_json, &traceDebugJsonRef);
+
+  JsValueRef arguments[] = { this->globalObject, this->globalObject,
+      this->keepAliveObject, traceDebugJsonRef };
+
+  JsErrorCode errorCode = JsCallFunction(initFunction, arguments,
+      _countof(arguments), chakraDebugObject);
+
+  CHAKRA_VERIFY_NOERROR(errorCode);
+
+  return true;
 }
 
 void ContextShim::SetAlignedPointerInEmbedderData(int index, void * value) {
@@ -503,17 +578,36 @@ DECLARE_GETOBJECT(StringObjectConstructor,
                   globalConstructor[GlobalType::String])
 DECLARE_GETOBJECT(DateConstructor,
                   globalConstructor[GlobalType::Date])
+DECLARE_GETOBJECT(RegExpConstructor,
+                  globalConstructor[GlobalType::RegExp])
 DECLARE_GETOBJECT(ProxyConstructor,
                   globalConstructor[GlobalType::Proxy])
-DECLARE_GETOBJECT(GetOwnPropertyDescriptorFunction,
+DECLARE_GETOBJECT(MapConstructor,
+                  globalConstructor[GlobalType::Map])
+DECLARE_GETOBJECT(HasOwnPropertyFunction,
                   globalPrototypeFunction[GlobalPrototypeFunction
-                      ::Object_getOwnPropertyDescriptor])
+                    ::Object_hasOwnProperty])
+DECLARE_GETOBJECT(ToStringFunction,
+                  globalPrototypeFunction[GlobalPrototypeFunction
+                    ::Object_toString])
+DECLARE_GETOBJECT(ValueOfFunction,
+                  globalPrototypeFunction[GlobalPrototypeFunction
+                    ::Object_valueOf])
 DECLARE_GETOBJECT(StringConcatFunction,
                   globalPrototypeFunction[GlobalPrototypeFunction
                     ::String_concat])
 DECLARE_GETOBJECT(ArrayPushFunction,
                   globalPrototypeFunction[GlobalPrototypeFunction
                     ::Array_push])
+DECLARE_GETOBJECT(MapGetFunction,
+                  globalPrototypeFunction[GlobalPrototypeFunction
+                    ::Map_get])
+DECLARE_GETOBJECT(MapSetFunction,
+                  globalPrototypeFunction[GlobalPrototypeFunction
+                    ::Map_set])
+DECLARE_GETOBJECT(MapHasFunction,
+                  globalPrototypeFunction[GlobalPrototypeFunction
+                    ::Map_has])
 
 
 JsValueRef ContextShim::GetProxyOfGlobal() {
@@ -539,6 +633,10 @@ JsValueRef ContextShim::GetCachedShimFunction(CachedPropertyIdRef id,
     JsErrorCode error = JsGetProperty(keepAliveObject,
                   GetIsolateShim()->GetCachedPropertyIdRef(id),
                   func);
+
+    // TTD_NODE
+    JsAddRef(*func, nullptr);
+
     CHAKRA_VERIFY(error == JsNoError);
   }
 
@@ -548,7 +646,7 @@ JsValueRef ContextShim::GetCachedShimFunction(CachedPropertyIdRef id,
 #define CHAKRASHIM_FUNCTION_GETTER(F) \
 JsValueRef ContextShim::Get##F##Function() { \
 return GetCachedShimFunction(CachedPropertyIdRef::F, \
-                             &##F##Function); \
+                             &F##Function); \
 } \
 
 CHAKRASHIM_FUNCTION_GETTER(cloneObject)
@@ -566,6 +664,7 @@ CHAKRASHIM_FUNCTION_GETTER(ensureDebug)
 CHAKRASHIM_FUNCTION_GETTER(enqueueMicrotask);
 CHAKRASHIM_FUNCTION_GETTER(dequeueMicrotask);
 CHAKRASHIM_FUNCTION_GETTER(getPropertyAttributes);
+CHAKRASHIM_FUNCTION_GETTER(getOwnPropertyNames);
 
 #define DEF_IS_TYPE(F) CHAKRASHIM_FUNCTION_GETTER(F)
 #include "jsrtcachedpropertyidref.inc"
@@ -577,7 +676,7 @@ namespace v8 {
 
 // This shim wraps Object.prototype.toString to supports ObjectTemplate class
 // name.
-JsValueRef CALLBACK Utils::ObjectPrototypeToStringShim(
+JsValueRef CHAKRA_CALLBACK Utils::ObjectPrototypeToStringShim(
     JsValueRef callee,
     bool isConstructCall,
     JsValueRef *arguments,

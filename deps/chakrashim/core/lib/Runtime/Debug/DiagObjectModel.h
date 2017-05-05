@@ -133,7 +133,8 @@ namespace Js
         UIGroupType_None,
         UIGroupType_InnerScope,           // variables under the innerscope (such as Block/Catch)
         UIGroupType_Scope,
-        UIGroupType_Globals
+        UIGroupType_Globals,
+        UIGroupType_Param
     };
 
     enum FramesLocalType
@@ -202,9 +203,10 @@ namespace Js
         static uint GetBreakMutationBreakpointsCount(DiagStackFrame* frame);
 #endif
 
-        bool IsInGroup() const { return (groupType != UIGroupType::UIGroupType_None && groupType != UIGroupType::UIGroupType_InnerScope); }
-        bool IsWalkerForCurrentFrame() const { return groupType == UIGroupType::UIGroupType_None; }
+        bool IsInGroup() const { return (groupType != UIGroupType::UIGroupType_None && groupType != UIGroupType::UIGroupType_Param && groupType != UIGroupType::UIGroupType_InnerScope); }
+        bool IsWalkerForCurrentFrame() const { return groupType == UIGroupType::UIGroupType_None || groupType == UIGroupType_Param; }
         DebuggerScope * GetScopeWhenHaltAtFormals();
+        static bool IsInParamScope(DebuggerScope* scope, DiagStackFrame* pFrame);
 
         int GetAdjustedByteCodeOffset() const;
 
@@ -576,12 +578,12 @@ namespace Js
         // Just populate the indexes only.
         bool fOnlyOwnProperties;
 
-        uint32 RecyclableArrayWalker::GetItemCount(Js::JavascriptArray* arrayObj);
+        uint32 GetItemCount(Js::JavascriptArray* arrayObj);
 
         // ES5Array will extend this.
         virtual uint32 GetNextDescriptor(uint32 currentDescriptor) { return Js::JavascriptArray::InvalidIndex; }
 
-        LPCWSTR RecyclableArrayWalker::GetIndexName(uint32 index, StringBuilder<ArenaAllocator>* stringBuilder);
+        LPCWSTR GetIndexName(uint32 index, StringBuilder<ArenaAllocator>* stringBuilder);
 
         Js::JavascriptArray* GetArrayObject();
 

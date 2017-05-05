@@ -62,9 +62,7 @@ function normalizeOptions(options) {
  * @returns {boolean} `true` if such group existed.
  */
 function includesBothInAGroup(groups, left, right) {
-    return groups.some(function(group) {
-        return group.indexOf(left) !== -1 && group.indexOf(right) !== -1;
-    });
+    return groups.some(group => group.indexOf(left) !== -1 && group.indexOf(right) !== -1);
 }
 
 //------------------------------------------------------------------------------
@@ -86,7 +84,7 @@ module.exports = {
                         type: "array",
                         items: {
                             type: "array",
-                            items: {enum: ALL_OPERATORS},
+                            items: { enum: ALL_OPERATORS },
                             minItems: 2,
                             uniqueItems: true
                         },
@@ -150,13 +148,7 @@ module.exports = {
          * @returns {Token} The operator token of the node.
          */
         function getOperatorToken(node) {
-            let token = sourceCode.getTokenAfter(node.left);
-
-            while (token.value === ")") {
-                token = sourceCode.getTokenAfter(token);
-            }
-
-            return token;
+            return sourceCode.getTokenAfter(node.left, astUtils.isNotClosingParenToken);
         }
 
         /**
@@ -173,18 +165,23 @@ module.exports = {
             const left = (parent.left === node) ? node : parent;
             const right = (parent.left !== node) ? node : parent;
             const message =
-                "Unexpected mix of '" + left.operator + "' and '" +
-                right.operator + "'.";
+                "Unexpected mix of '{{leftOperator}}' and '{{rightOperator}}'.";
+            const data = {
+                leftOperator: left.operator,
+                rightOperator: right.operator
+            };
 
             context.report({
                 node: left,
                 loc: getOperatorToken(left).loc.start,
-                message
+                message,
+                data
             });
             context.report({
                 node: right,
                 loc: getOperatorToken(right).loc.start,
-                message
+                message,
+                data
             });
         }
 

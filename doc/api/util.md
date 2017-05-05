@@ -1,4 +1,4 @@
-# util
+# Util
 
 > Stability: 2 - Stable
 
@@ -15,7 +15,7 @@ const util = require('util');
 added: v0.11.3
 -->
 
-* `section` {String} A string identifying the portion of the application for
+* `section` {string} A string identifying the portion of the application for
   which the `debuglog` function is being created.
 * Returns: {Function} The logging function
 
@@ -88,7 +88,7 @@ The `--throw-deprecation` command line flag and `process.throwDeprecation`
 property take precedence over `--trace-deprecation` and
 `process.traceDeprecation`.
 
-## util.format(format[, ...])
+## util.format(format[, ...args])
 <!-- YAML
 added: v0.5.3
 -->
@@ -103,7 +103,9 @@ Each placeholder token is replaced with the converted value from the
 corresponding argument. Supported placeholders are:
 
 * `%s` - String.
-* `%d` - Number (both integer and float).
+* `%d` - Number (integer or floating point value).
+* `%i` - Integer.
+* `%f` - Floating point value.
 * `%j` - JSON.  Replaced with the string `'[Circular]'` if the argument
 contains circular references.
 * `%%` - single percent sign (`'%'`). This does not consume an argument.
@@ -113,7 +115,7 @@ not replaced.
 
 ```js
 util.format('%s:%s', 'foo');
-  // Returns 'foo:%s'
+// Returns: 'foo:%s'
 ```
 
 If there are more arguments passed to the `util.format()` method than the
@@ -136,6 +138,10 @@ util.format(1, 2, 3); // '1 2 3'
 ## util.inherits(constructor, superConstructor)
 <!-- YAML
 added: v0.3.0
+changes:
+  - version: v5.0.0
+    pr-url: https://github.com/nodejs/node/pull/3455
+    description: The `constructor` parameter can refer to an ES6 class now.
 -->
 
 _Note: usage of `util.inherits()` is discouraged. Please use the ES6 `class` and
@@ -180,7 +186,6 @@ stream.write('It works!'); // Received data: "It works!"
 ES6 example using `class` and `extends`
 
 ```js
-const util = require('util');
 const EventEmitter = require('events');
 
 class MyStream extends EventEmitter {
@@ -204,6 +209,20 @@ stream.write('With ES6');
 ## util.inspect(object[, options])
 <!-- YAML
 added: v0.3.0
+changes:
+  - version: v6.6.0
+    pr-url: https://github.com/nodejs/node/pull/8174
+    description: Custom inspection functions can now return `this`.
+  - version: v6.3.0
+    pr-url: https://github.com/nodejs/node/pull/7499
+    description: The `breakLength` option is supported now.
+  - version: v6.1.0
+    pr-url: https://github.com/nodejs/node/pull/6334
+    description: The `maxArrayLength` option is supported now; in particular,
+                 long arrays are truncated by default.
+  - version: v6.1.0
+    pr-url: https://github.com/nodejs/node/pull/6465
+    description: The `showProxy` option is supported now.
 -->
 
 * `object` {any} Any JavaScript primitive or Object.
@@ -286,13 +305,31 @@ invoke and use the result of when inspecting the object:
 ```js
 const util = require('util');
 
-const obj = { name: 'nate' };
-obj[util.inspect.custom] = function(depth) {
-  return `{${this.name}}`;
-};
+class Box {
+  constructor(value) {
+    this.value = value;
+  }
 
-util.inspect(obj);
-  // "{nate}"
+  inspect(depth, options) {
+    if (depth < 0) {
+      return options.stylize('[Box]', 'special');
+    }
+
+    const newOptions = Object.assign({}, options, {
+      depth: options.depth === null ? null : options.depth - 1
+    });
+
+    // Five space padding because that's the size of "Box< ".
+    const padding = ' '.repeat(5);
+    const inner = util.inspect(this.value, newOptions).replace(/\n/g, '\n' + padding);
+    return options.stylize('Box', 'special') + '< ' + inner + ' >';
+  }
+}
+
+const box = new Box(true);
+
+util.inspect(box);
+// Returns: "Box< true >"
 ```
 
 Custom `[util.inspect.custom](depth, opts)` functions typically return a string
@@ -308,7 +345,7 @@ obj[util.inspect.custom] = function(depth) {
 };
 
 util.inspect(obj);
-  // "{ bar: 'baz' }"
+// Returns: "{ bar: 'baz' }"
 ```
 
 A custom inspection method can alternatively be provided by exposing
@@ -323,8 +360,16 @@ obj.inspect = function(depth) {
 };
 
 util.inspect(obj);
-  // "{ bar: 'baz' }"
+// Returns: "{ bar: 'baz' }"
 ```
+
+### util.inspect.custom
+<!-- YAML
+added: v6.6.0
+-->
+
+A Symbol that can be used to declare custom inspect functions, see
+[Custom inspection functions on Objects][].
 
 ### util.inspect.defaultOptions
 <!-- YAML
@@ -346,18 +391,24 @@ util.inspect.defaultOptions.maxArrayLength = null;
 console.log(arr); // logs the full array
 ```
 
-### util.inspect.custom
-<!-- YAML
-added: REPLACEME
--->
-
-A Symbol that can be used to declare custom inspect functions, see
-[Custom inspection functions on Objects][].
-
 ## Deprecated APIs
 
 The following APIs have been deprecated and should no longer be used. Existing
 applications and modules should be updated to find alternative approaches.
+
+### util.\_extend(target, source)
+<!-- YAML
+added: v0.7.5
+deprecated: v6.0.0
+-->
+
+> Stability: 0 - Deprecated: Use [`Object.assign()`] instead.
+
+The `util._extend()` method was never intended to be used outside of internal
+Node.js modules. The community found and used it anyway.
+
+It is deprecated and should not be used in new code. JavaScript comes with very
+similar built-in functionality through [`Object.assign()`].
 
 ### util.debug(string)
 <!-- YAML
@@ -371,7 +422,7 @@ deprecated: v0.11.3
 
 Deprecated predecessor of `console.error`.
 
-### util.error([...])
+### util.error([...strings])
 <!-- YAML
 added: v0.3.0
 deprecated: v0.11.3
@@ -379,7 +430,7 @@ deprecated: v0.11.3
 
 > Stability: 0 - Deprecated: Use [`console.error()`][] instead.
 
-* `string` {string} The message to print to `stderr`
+* `...strings` {string} The message to print to `stderr`
 
 Deprecated predecessor of `console.error`.
 
@@ -401,11 +452,11 @@ Returns `true` if the given `object` is an `Array`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isArray([]);
-  // true
+// Returns: true
 util.isArray(new Array);
-  // true
+// Returns: true
 util.isArray({});
-  // false
+// Returns: false
 ```
 
 ### util.isBoolean(object)
@@ -424,11 +475,11 @@ Returns `true` if the given `object` is a `Boolean`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isBoolean(1);
-  // false
+// Returns: false
 util.isBoolean(0);
-  // false
+// Returns: false
 util.isBoolean(false);
-  // true
+// Returns: true
 ```
 
 ### util.isBuffer(object)
@@ -447,11 +498,11 @@ Returns `true` if the given `object` is a `Buffer`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isBuffer({ length: 0 });
-  // false
+// Returns: false
 util.isBuffer([]);
-  // false
+// Returns: false
 util.isBuffer(Buffer.from('hello world'));
-  // true
+// Returns: true
 ```
 
 ### util.isDate(object)
@@ -470,11 +521,11 @@ Returns `true` if the given `object` is a `Date`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isDate(new Date());
-  // true
+// Returns: true
 util.isDate(Date());
-  // false (without 'new' returns a String)
+// false (without 'new' returns a String)
 util.isDate({});
-  // false
+// Returns: false
 ```
 
 ### util.isError(object)
@@ -494,11 +545,11 @@ Returns `true` if the given `object` is an [`Error`][]. Otherwise, returns
 const util = require('util');
 
 util.isError(new Error());
-  // true
+// Returns: true
 util.isError(new TypeError());
-  // true
+// Returns: true
 util.isError({ name: 'Error', message: 'an error occurred' });
-  // false
+// Returns: false
 ```
 
 Note that this method relies on `Object.prototype.toString()` behavior. It is
@@ -510,10 +561,10 @@ const util = require('util');
 const obj = { name: 'Error', message: 'an error occurred' };
 
 util.isError(obj);
-  // false
+// Returns: false
 obj[Symbol.toStringTag] = 'Error';
 util.isError(obj);
-  // true
+// Returns: true
 ```
 
 ### util.isFunction(object)
@@ -536,11 +587,11 @@ function Foo() {}
 const Bar = function() {};
 
 util.isFunction({});
-  // false
+// Returns: false
 util.isFunction(Foo);
-  // true
+// Returns: true
 util.isFunction(Bar);
-  // true
+// Returns: true
 ```
 
 ### util.isNull(object)
@@ -560,11 +611,11 @@ Returns `true` if the given `object` is strictly `null`. Otherwise, returns
 const util = require('util');
 
 util.isNull(0);
-  // false
+// Returns: false
 util.isNull(undefined);
-  // false
+// Returns: false
 util.isNull(null);
-  // true
+// Returns: true
 ```
 
 ### util.isNullOrUndefined(object)
@@ -584,11 +635,11 @@ returns `false`.
 const util = require('util');
 
 util.isNullOrUndefined(0);
-  // false
+// Returns: false
 util.isNullOrUndefined(undefined);
-  // true
+// Returns: true
 util.isNullOrUndefined(null);
-  // true
+// Returns: true
 ```
 
 ### util.isNumber(object)
@@ -607,13 +658,13 @@ Returns `true` if the given `object` is a `Number`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isNumber(false);
-  // false
+// Returns: false
 util.isNumber(Infinity);
-  // true
+// Returns: true
 util.isNumber(0);
-  // true
+// Returns: true
 util.isNumber(NaN);
-  // true
+// Returns: true
 ```
 
 ### util.isObject(object)
@@ -626,20 +677,20 @@ deprecated: v4.0.0
 
 * `object` {any}
 
-Returns `true` if the given `object` is strictly an `Object` __and__ not a
+Returns `true` if the given `object` is strictly an `Object` **and** not a
 `Function`. Otherwise, returns `false`.
 
 ```js
 const util = require('util');
 
 util.isObject(5);
-  // false
+// Returns: false
 util.isObject(null);
-  // false
+// Returns: false
 util.isObject({});
-  // true
+// Returns: true
 util.isObject(function(){});
-  // false
+// Returns: false
 ```
 
 ### util.isPrimitive(object)
@@ -659,23 +710,23 @@ Returns `true` if the given `object` is a primitive type. Otherwise, returns
 const util = require('util');
 
 util.isPrimitive(5);
-  // true
+// Returns: true
 util.isPrimitive('foo');
-  // true
+// Returns: true
 util.isPrimitive(false);
-  // true
+// Returns: true
 util.isPrimitive(null);
-  // true
+// Returns: true
 util.isPrimitive(undefined);
-  // true
+// Returns: true
 util.isPrimitive({});
-  // false
+// Returns: false
 util.isPrimitive(function() {});
-  // false
+// Returns: false
 util.isPrimitive(/^$/);
-  // false
+// Returns: false
 util.isPrimitive(new Date());
-  // false
+// Returns: false
 ```
 
 ### util.isRegExp(object)
@@ -694,11 +745,11 @@ Returns `true` if the given `object` is a `RegExp`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isRegExp(/some regexp/);
-  // true
+// Returns: true
 util.isRegExp(new RegExp('another regexp'));
-  // true
+// Returns: true
 util.isRegExp({});
-  // false
+// Returns: false
 ```
 
 ### util.isString(object)
@@ -717,13 +768,13 @@ Returns `true` if the given `object` is a `string`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isString('');
-  // true
+// Returns: true
 util.isString('foo');
-  // true
+// Returns: true
 util.isString(String('foo'));
-  // true
+// Returns: true
 util.isString(5);
-  // false
+// Returns: false
 ```
 
 ### util.isSymbol(object)
@@ -742,11 +793,11 @@ Returns `true` if the given `object` is a `Symbol`. Otherwise, returns `false`.
 const util = require('util');
 
 util.isSymbol(5);
-  // false
+// Returns: false
 util.isSymbol('foo');
-  // false
+// Returns: false
 util.isSymbol(Symbol('foo'));
-  // true
+// Returns: true
 ```
 
 ### util.isUndefined(object)
@@ -766,11 +817,11 @@ const util = require('util');
 
 const foo = undefined;
 util.isUndefined(5);
-  // false
+// Returns: false
 util.isUndefined(foo);
-  // true
+// Returns: true
 util.isUndefined(null);
-  // false
+// Returns: false
 ```
 
 ### util.log(string)
@@ -792,7 +843,7 @@ const util = require('util');
 util.log('Timestamped message.');
 ```
 
-### util.print([...])
+### util.print([...strings])
 <!-- YAML
 added: v0.3.0
 deprecated: v0.11.3
@@ -802,7 +853,7 @@ deprecated: v0.11.3
 
 Deprecated predecessor of `console.log`.
 
-### util.puts([...])
+### util.puts([...strings])
 <!-- YAML
 added: v0.3.0
 deprecated: v0.11.3
@@ -811,20 +862,6 @@ deprecated: v0.11.3
 > Stability: 0 - Deprecated: Use [`console.log()`][] instead.
 
 Deprecated predecessor of `console.log`.
-
-### util.\_extend(target, source)
-<!-- YAML
-added: v0.7.5
-deprecated: v6.0.0
--->
-
-> Stability: 0 - Deprecated: Use [`Object.assign()`] instead.
-
-The `util._extend()` method was never intended to be used outside of internal
-Node.js modules. The community found and used it anyway.
-
-It is deprecated and should not be used in new code. JavaScript comes with very
-similar built-in functionality through [`Object.assign()`].
 
 [`Array.isArray`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/isArray
 [constructor]: https://developer.mozilla.org/en/JavaScript/Reference/Global_Objects/Object/constructor
@@ -833,7 +870,7 @@ similar built-in functionality through [`Object.assign()`].
 [Customizing `util.inspect` colors]: #util_customizing_util_inspect_colors
 [Custom inspection functions on Objects]: #util_custom_inspection_functions_on_objects
 [`Error`]: errors.html#errors_class_error
-[`console.log()`]: console.html#console_console_log_data
-[`console.error()`]: console.html#console_console_error_data
+[`console.log()`]: console.html#console_console_log_data_args
+[`console.error()`]: console.html#console_console_error_data_args
 [`Buffer.isBuffer()`]: buffer.html#buffer_class_method_buffer_isbuffer_obj
 [`Object.assign()`]: https://developer.mozilla.org/en/docs/Web/JavaScript/Reference/Global_Objects/Object/assign

@@ -11,11 +11,12 @@ assert.strictEqual(-1, a.compare(b));
 // Equivalent to a.compare(b).
 assert.strictEqual(-1, a.compare(b, 0));
 assert.strictEqual(-1, a.compare(b, '0'));
+assert.strictEqual(-1, a.compare(b, undefined));
 
 // Equivalent to a.compare(b).
 assert.strictEqual(-1, a.compare(b, 0, undefined, 0));
 
-// Zero-length targer, return 1
+// Zero-length target, return 1
 assert.strictEqual(1, a.compare(b, 0, 0, 0));
 assert.strictEqual(1, a.compare(b, '0', '0', '0'));
 
@@ -24,6 +25,10 @@ assert.strictEqual(1, a.compare(b, 6, 10));
 
 // Zero-length source, return -1
 assert.strictEqual(-1, a.compare(b, 6, 10, 0, 0));
+
+// Zero-length source and target, return 0
+assert.strictEqual(0, a.compare(b, 0, 0, 0, 0));
+assert.strictEqual(0, a.compare(b, 1, 1, 2, 2));
 
 // Equivalent to Buffer.compare(a.slice(4), b.slice(0, 5))
 assert.strictEqual(1, a.compare(b, 0, 5, 4));
@@ -59,5 +64,6 @@ assert.throws(() => a.compare(b, 0, 1, 0, 100), oor);
 assert.throws(() => a.compare(b, -1), oor);
 assert.throws(() => a.compare(b, 0, '0xff'), oor);
 assert.throws(() => a.compare(b, 0, Infinity), oor);
+assert.throws(() => a.compare(b, 0, 1, -1), oor);
 assert.throws(() => a.compare(b, -Infinity, Infinity), oor);
 assert.throws(() => a.compare(), /Argument must be a Buffer/);

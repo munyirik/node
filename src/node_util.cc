@@ -14,6 +14,7 @@ using v8::Integer;
 using v8::Local;
 using v8::Object;
 using v8::Private;
+using v8::Promise;
 using v8::Proxy;
 using v8::Value;
 
@@ -22,13 +23,16 @@ using v8::Value;
   V(isArrayBuffer, IsArrayBuffer)                                             \
   V(isDataView, IsDataView)                                                   \
   V(isDate, IsDate)                                                           \
+  V(isExternal, IsExternal)                                                   \
   V(isMap, IsMap)                                                             \
   V(isMapIterator, IsMapIterator)                                             \
   V(isPromise, IsPromise)                                                     \
   V(isRegExp, IsRegExp)                                                       \
   V(isSet, IsSet)                                                             \
   V(isSetIterator, IsSetIterator)                                             \
-  V(isTypedArray, IsTypedArray)
+  V(isSharedArrayBuffer, IsSharedArrayBuffer)                                 \
+  V(isTypedArray, IsTypedArray)                                               \
+  V(isUint8Array, IsUint8Array)
 
 
 #define V(_, ucname) \
@@ -39,6 +43,24 @@ using v8::Value;
 
   VALUE_METHOD_MAP(V)
 #undef V
+
+static void GetPromiseDetails(const FunctionCallbackInfo<Value>& args) {
+  // Return undefined if it's not a Promise.
+  if (!args[0]->IsPromise())
+    return;
+
+  auto isolate = args.GetIsolate();
+
+  Local<Promise> promise = args[0].As<Promise>();
+  Local<Array> ret = Array::New(isolate, 2);
+
+  int state = promise->State();
+  ret->Set(0, Integer::New(isolate, state));
+  if (state != Promise::PromiseState::kPending)
+    ret->Set(1, promise->Result());
+
+  args.GetReturnValue().Set(ret);
+}
 
 static void GetProxyDetails(const FunctionCallbackInfo<Value>& args) {
   // Return undefined if it's not a proxy.
@@ -132,15 +154,32 @@ void Initialize(Local<Object> target,
 #define V(name, _)                                                            \
   target->Set(context,                                                        \
               FIXED_ONE_BYTE_STRING(env->isolate(), #name),                   \
-              Integer::NewFromUnsigned(env->isolate(), index++));
+              Integer::NewFromUnsigned(env->isolate(), index++)).FromJust();
   {
     uint32_t index = 0;
     PER_ISOLATE_PRIVATE_SYMBOL_PROPERTIES(V)
   }
 #undef V
 
+  target->DefineOwnProperty(
+    env->context(),
+    OneByteString(env->isolate(), "pushValToArrayMax"),
+    Integer::NewFromUnsigned(env->isolate(), NODE_PUSH_VAL_TO_ARRAY_MAX),
+    v8::ReadOnly).FromJust();
+
+#define V(name)                                                               \
+  target->Set(context,                                                        \
+              FIXED_ONE_BYTE_STRING(env->isolate(), #name),                   \
+              Integer::New(env->isolate(), Promise::PromiseState::name))      \
+    .FromJust()
+  V(kPending);
+  V(kFulfilled);
+  V(kRejected);
+#undef V
+
   env->SetMethod(target, "getHiddenValue", GetHiddenValue);
   env->SetMethod(target, "setHiddenValue", SetHiddenValue);
+  env->SetMethod(target, "getPromiseDetails", GetPromiseDetails);
   env->SetMethod(target, "getProxyDetails", GetProxyDetails);
 
   env->SetMethod(target, "startSigintWatchdog", StartSigintWatchdog);

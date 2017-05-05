@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "node.h"
 #include "node_buffer.h"
 #include "node_constants.h"
@@ -7,6 +28,7 @@
 #include "node_version.h"
 #include "node_internals.h"
 #include "node_revert.h"
+#include "node_debug_options.h"
 
 #if defined HAVE_PERFCTR
 #include "node_counters.h"
@@ -37,6 +59,7 @@
 #include "req-wrap.h"
 #include "req-wrap-inl.h"
 #include "string_bytes.h"
+#include "tracing/agent.h"
 #include "util.h"
 #include "uv.h"
 #if NODE_USE_V8_PLATFORM
@@ -93,6 +116,16 @@ typedef int mode_t;
 #elif !defined(_MSC_VER)
 extern char **environ;
 #endif
+#if ENABLE_TTD_NODE
+bool s_doTTRecord = false;
+bool s_doTTReplay = false;
+bool s_doTTDebug = false;
+size_t s_ttoptReplayUriLength = 0;
+const char* s_ttoptReplayUri = NULL;
+uint32_t s_ttdSnapInterval = 2000;
+uint32_t s_ttdSnapHistoryLength = 2;
+uint64_t s_ttdStartupMode = 0x1;
+#endif
 
 #ifdef UWP_DLL
 #include "node_logger.h"
@@ -118,6 +151,7 @@ using v8::Locker;
 using v8::MaybeLocal;
 using v8::Message;
 using v8::Name;
+using v8::NamedPropertyHandlerConfiguration;
 using v8::Null;
 using v8::Number;
 using v8::Object;
@@ -147,17 +181,6 @@ static bool track_heap_objects = false;
 static const char* eval_string = nullptr;
 static unsigned int preload_module_count = 0;
 static const char** preload_modules = nullptr;
-#if HAVE_INSPECTOR
-static bool use_inspector = false;
-#else
-static const bool use_inspector = false;
-#endif
-static bool use_debug_agent = false;
-static bool debug_wait_connect = false;
-static std::string* debug_host;  // coverity[leaked_storage]
-static int debug_port = 5858;
-static std::string* inspector_host;  // coverity[leaked_storage]
-static int inspector_port = 9229;
 static const int v8_default_thread_pool_size = 4;
 static int v8_thread_pool_size = v8_default_thread_pool_size;
 static bool prof_process = false;
@@ -167,20 +190,36 @@ static node_module* modpending;
 static node_module* modlist_builtin;
 static node_module* modlist_linked;
 static node_module* modlist_addon;
+static bool trace_enabled = false;
+static std::string trace_enabled_categories;  // NOLINT(runtime/string)
 
 #if defined(NODE_HAVE_I18N_SUPPORT)
 // Path to ICU data (for i18n / Intl)
-static const char* icu_data_dir = nullptr;
+std::string icu_data_dir;  // NOLINT(runtime/string)
 #endif
+
+// N-API is in experimental state, disabled by default.
+bool load_napi_modules = false;
 
 // used by C++ modules as well
 bool no_deprecation = false;
 
-#if HAVE_OPENSSL && NODE_FIPS_MODE
+#if HAVE_OPENSSL
+// use OpenSSL's cert store instead of bundled certs
+bool ssl_openssl_cert_store =
+#if defined(NODE_OPENSSL_CERT_STORE)
+        true;
+#else
+        false;
+#endif
+
+# if NODE_FIPS_MODE
 // used by crypto module
 bool enable_fips_crypto = false;
 bool force_fips_crypto = false;
-#endif
+# endif  // NODE_FIPS_MODE
+std::string openssl_config;  // NOLINT(runtime/string)
+#endif  // HAVE_OPENSSL
 
 // true if process warnings should be suppressed
 bool no_process_warnings = false;
@@ -191,6 +230,11 @@ bool trace_warnings = false;
 // that is used by lib/module.js
 bool config_preserve_symlinks = false;
 
+// Set in node.cc by ParseArgs when --redirect-warnings= is used.
+std::string config_warning_file;  // NOLINT(runtime/string)
+
+bool v8_initialized = false;
+
 // process-relative uptime base, initialized at start-up
 static double prog_start_time;
 static bool debugger_running;
@@ -199,11 +243,14 @@ static uv_async_t dispatch_debug_messages_async;
 static Mutex node_isolate_mutex;
 static v8::Isolate* node_isolate;
 
+static node::DebugOptions debug_options;
+
 static struct {
 #if NODE_USE_V8_PLATFORM
   void Initialize(int thread_pool_size) {
     platform_ = v8::platform::CreateDefaultPlatform(thread_pool_size);
     V8::InitializePlatform(platform_);
+    tracing::TraceEventHelper::SetCurrentPlatform(platform_);
   }
 
   void PumpMessageLoop(Isolate* isolate) {
@@ -215,30 +262,44 @@ static struct {
     platform_ = nullptr;
   }
 
-  bool StartInspector(Environment *env, const char* script_path,
-                      int port, bool wait) {
 #if HAVE_INSPECTOR
-    return env->inspector_agent()->Start(platform_, script_path, port, wait);
-#else
-    return true;
+  bool StartInspector(Environment *env, const char* script_path,
+                      const node::DebugOptions& options) {
+    return env->inspector_agent()->Start(platform_, script_path, options);
+  }
 #endif  // HAVE_INSPECTOR
+
+  void StartTracingAgent() {
+    CHECK(tracing_agent_ == nullptr);
+    tracing_agent_ = new tracing::Agent();
+    tracing_agent_->Start(platform_, trace_enabled_categories);
+  }
+
+  void StopTracingAgent() {
+    tracing_agent_->Stop();
   }
 
   v8::Platform* platform_;
+  tracing::Agent* tracing_agent_;
 #else  // !NODE_USE_V8_PLATFORM
   void Initialize(int thread_pool_size) {}
   void PumpMessageLoop(Isolate* isolate) {}
   void Dispose() {}
   bool StartInspector(Environment *env, const char* script_path,
-                      int port, bool wait) {
+                      const node::DebugOptions& options) {
     env->ThrowError("Node compiled with NODE_USE_V8_PLATFORM=0");
-    return false;  // make compiler happy
+    return true;
   }
+
+  void StartTracingAgent() {
+    fprintf(stderr, "Node compiled with NODE_USE_V8_PLATFORM=0, "
+                    "so event tracing is not available.\n");
+  }
+  void StopTracingAgent() {}
 #endif  // !NODE_USE_V8_PLATFORM
 } v8_platform;
 
 #ifdef __POSIX__
-static uv_sem_t debug_semaphore;
 static const unsigned kMaxSignal = 32;
 #endif
 
@@ -910,13 +971,22 @@ Local<Value> UVException(Isolate* isolate,
 
 
 // Look up environment variable unless running as setuid root.
-inline const char* secure_getenv(const char* key) {
+bool SafeGetenv(const char* key, std::string* text) {
 #ifndef _WIN32
-  if (getuid() != geteuid() || getgid() != getegid())
-    return nullptr;
+  // TODO(bnoordhuis) Should perhaps also check whether getauxval(AT_SECURE)
+  // is non-zero on Linux.
+  if (getuid() != geteuid() || getgid() != getegid()) {
+    text->clear();
+    return false;
+  }
 #endif
 #ifndef UWP_DLL
-  return getenv(key);
+  if (const char* value = getenv(key)) {
+    *text = value;
+    return true;
+  }
+  text->clear();
+  return false;
 #else
   return nullptr;
 #endif
@@ -997,9 +1067,9 @@ Local<Value> WinapiErrnoException(Isolate* isolate,
 
 void* ArrayBufferAllocator::Allocate(size_t size) {
   if (zero_fill_field_ || zero_fill_all_buffers)
-    return node::Calloc(size, 1);
+    return node::UncheckedCalloc(size);
   else
-    return node::Malloc(size);
+    return node::UncheckedMalloc(size);
 }
 
 static bool DomainHasErrorHandler(const Environment* env,
@@ -1285,6 +1355,7 @@ Local<Value> MakeCallback(Environment* env,
 
   if (tick_info->length() == 0) {
     tick_info->set_index(0);
+    return ret;
   }
 
   if (env->tick_callback_function()->Call(process, 0, nullptr).IsEmpty()) {
@@ -1317,45 +1388,48 @@ Local<Value> MakeCallback(Environment* env,
 
 
 Local<Value> MakeCallback(Isolate* isolate,
-                           Local<Object> recv,
-                           const char* method,
-                           int argc,
-                           Local<Value> argv[]) {
+                          Local<Object> recv,
+                          const char* method,
+                          int argc,
+                          Local<Value> argv[]) {
   EscapableHandleScope handle_scope(isolate);
-  Local<Context> context = recv->CreationContext();
-  Environment* env = Environment::GetCurrent(context);
-  Context::Scope context_scope(context);
+  Local<String> method_string = OneByteString(isolate, method);
   return handle_scope.Escape(
-      Local<Value>::New(isolate, MakeCallback(env, recv, method, argc, argv)));
+      MakeCallback(isolate, recv, method_string, argc, argv));
 }
 
 
 Local<Value> MakeCallback(Isolate* isolate,
-                           Local<Object> recv,
-                           Local<String> symbol,
-                           int argc,
-                           Local<Value> argv[]) {
+                          Local<Object> recv,
+                          Local<String> symbol,
+                          int argc,
+                          Local<Value> argv[]) {
   EscapableHandleScope handle_scope(isolate);
-  Local<Context> context = recv->CreationContext();
-  Environment* env = Environment::GetCurrent(context);
-  Context::Scope context_scope(context);
-  return handle_scope.Escape(
-      Local<Value>::New(isolate, MakeCallback(env, recv, symbol, argc, argv)));
+  Local<Value> callback_v = recv->Get(symbol);
+  if (callback_v.IsEmpty()) return Local<Value>();
+  if (!callback_v->IsFunction()) return Local<Value>();
+  Local<Function> callback = callback_v.As<Function>();
+  return handle_scope.Escape(MakeCallback(isolate, recv, callback, argc, argv));
 }
 
 
 Local<Value> MakeCallback(Isolate* isolate,
-                           Local<Object> recv,
-                           Local<Function> callback,
-                           int argc,
-                           Local<Value> argv[]) {
+                          Local<Object> recv,
+                          Local<Function> callback,
+                          int argc,
+                          Local<Value> argv[]) {
+  // Observe the following two subtleties:
+  //
+  // 1. The environment is retrieved from the callback function's context.
+  // 2. The context to enter is retrieved from the environment.
+  //
+  // Because of the AssignToContext() call in src/node_contextify.cc,
+  // the two contexts need not be the same.
   EscapableHandleScope handle_scope(isolate);
-  Local<Context> context = recv->CreationContext();
-  Environment* env = Environment::GetCurrent(context);
-  Context::Scope context_scope(context);
-  return handle_scope.Escape(Local<Value>::New(
-        isolate,
-        MakeCallback(env, recv.As<Value>(), callback, argc, argv)));
+  Environment* env = Environment::GetCurrent(callback->CreationContext());
+  Context::Scope context_scope(env->context());
+  return handle_scope.Escape(
+      MakeCallback(env, recv.As<Value>(), callback, argc, argv));
 }
 
 
@@ -2205,7 +2279,7 @@ static void WaitForInspectorDisconnect(Environment* env) {
   if (env->inspector_agent()->IsConnected()) {
     // Restore signal dispositions, the app is done and is no longer
     // capable of handling signals.
-#ifdef __POSIX__
+#if defined(__POSIX__) && !defined(NODE_SHARED_MODE)
     struct sigaction act;
     memset(&act, 0, sizeof(act));
     for (unsigned nr = 1; nr < kMaxSignal; nr += 1) {
@@ -2222,6 +2296,12 @@ static void WaitForInspectorDisconnect(Environment* env) {
 
 
 void Exit(const FunctionCallbackInfo<Value>& args) {
+#if ENABLE_TTD_NODE
+    // If TTD recording is enable then we want to emit the log info
+    if (s_doTTRecord) {
+        JsTTDHostExit(args[0]->Int32Value());
+    }
+#endif
   WaitForInspectorDisconnect(Environment::GetCurrent(args));
   exit(args[0]->Int32Value());
 }
@@ -2247,21 +2327,28 @@ void MemoryUsage(const FunctionCallbackInfo<Value>& args) {
     return env->ThrowUVException(err, "uv_resident_set_memory");
   }
 
+  Isolate* isolate = env->isolate();
   // V8 memory usage
   HeapStatistics v8_heap_stats;
-  env->isolate()->GetHeapStatistics(&v8_heap_stats);
+  isolate->GetHeapStatistics(&v8_heap_stats);
 
-  Local<Number> heap_total =
-      Number::New(env->isolate(), v8_heap_stats.total_heap_size());
-  Local<Number> heap_used =
-      Number::New(env->isolate(), v8_heap_stats.used_heap_size());
+  // Get the double array pointer from the Float64Array argument.
+  CHECK(args[0]->IsFloat64Array());
+  Local<Float64Array> array = args[0].As<Float64Array>();
+  CHECK_EQ(array->Length(), 4);
+  Local<ArrayBuffer> ab = array->Buffer();
+  double* fields = static_cast<double*>(ab->GetContents().Data());
 
-  Local<Object> info = Object::New(env->isolate());
-  info->Set(env->rss_string(), Number::New(env->isolate(), rss));
-  info->Set(env->heap_total_string(), heap_total);
-  info->Set(env->heap_used_string(), heap_used);
+  fields[0] = rss;
+  fields[1] = v8_heap_stats.total_heap_size();
+  fields[2] = v8_heap_stats.used_heap_size();
+  fields[3] = isolate->AdjustAmountOfExternalAllocatedMemory(0);
 
-  args.GetReturnValue().Set(info);
+#if ENABLE_TTD_NODE
+  if (s_doTTRecord || s_doTTReplay) {
+    ab->TTDRawBufferModifyNotifySync(array->ByteOffset(), 4 * sizeof(double));
+  }
+#endif
 }
 
 
@@ -2283,21 +2370,27 @@ void Kill(const FunctionCallbackInfo<Value>& args) {
 
 // Hrtime exposes libuv's uv_hrtime() high-resolution timer.
 // The value returned by uv_hrtime() is a 64-bit int representing nanoseconds,
-// so this function instead returns an Array with 2 entries representing seconds
-// and nanoseconds, to avoid any integer overflow possibility.
-// Pass in an Array from a previous hrtime() call to instead get a time diff.
+// so this function instead fills in an Uint32Array with 3 entries,
+// to avoid any integer overflow possibility.
+// The first two entries contain the second part of the value
+// broken into the upper/lower 32 bits to be converted back in JS,
+// because there is no Uint64Array in JS.
+// The third entry contains the remaining nanosecond part of the value.
 void Hrtime(const FunctionCallbackInfo<Value>& args) {
   uint64_t t = uv_hrtime();
 
   Local<ArrayBuffer> ab = args[0].As<Uint32Array>()->Buffer();
   uint32_t* fields = static_cast<uint32_t*>(ab->GetContents().Data());
 
-  // These three indices will contain the values for the hrtime tuple. The
-  // seconds value is broken into the upper/lower 32 bits and stored in two
-  // uint32 fields to be converted back in JS.
   fields[0] = (t / NANOS_PER_SEC) >> 32;
   fields[1] = (t / NANOS_PER_SEC) & 0xffffffff;
   fields[2] = t % NANOS_PER_SEC;
+#if ENABLE_TTD_NODE
+  if (s_doTTRecord || s_doTTReplay) {
+    ab->TTDRawBufferModifyNotifySync(args[0].As<Uint32Array>()->ByteOffset(),
+                                     3 * sizeof(uint32_t));
+  }
+#endif
 }
 
 // Microseconds in a second, as a float, used in CPUUsage() below
@@ -2330,6 +2423,11 @@ void CPUUsage(const FunctionCallbackInfo<Value>& args) {
   // Set the Float64Array elements to be user / system values in microseconds.
   fields[0] = MICROS_PER_SEC * rusage.ru_utime.tv_sec + rusage.ru_utime.tv_usec;
   fields[1] = MICROS_PER_SEC * rusage.ru_stime.tv_sec + rusage.ru_stime.tv_usec;
+#if ENABLE_TTD_NODE
+  if (s_doTTRecord || s_doTTReplay) {
+    ab->TTDRawBufferModifyNotifySync(array->ByteOffset(), 2 * sizeof(double));
+  }
+#endif
 }
 
 extern "C" void node_module_register(void* m) {
@@ -2372,8 +2470,6 @@ struct node_module* get_linked_module(const char* name) {
   CHECK(mp == nullptr || (mp->nm_flags & NM_F_LINKED) != 0);
   return mp;
 }
-
-typedef void (UV_DYNAMIC* extInit)(Local<Object> exports);
 
 // DLOpen is process.dlopen(module, filename).
 // Used to load 'module.node' dynamically shared objects.
@@ -2420,10 +2516,25 @@ void DLOpen(const FunctionCallbackInfo<Value>& args) {
   }
   if (mp->nm_version != NODE_MODULE_VERSION) {
     char errmsg[1024];
-    snprintf(errmsg,
-             sizeof(errmsg),
-             "Module version mismatch. Expected %d, got %d.",
-             NODE_MODULE_VERSION, mp->nm_version);
+    if (mp->nm_version == -1) {
+      snprintf(errmsg,
+               sizeof(errmsg),
+               "The module '%s'"
+               "\nwas compiled against the ABI-stable Node.js API (N-API)."
+               "\nThis feature is experimental and must be enabled on the "
+               "\ncommand-line by adding --napi-modules.",
+               *filename);
+    } else {
+      snprintf(errmsg,
+               sizeof(errmsg),
+               "The module '%s'"
+               "\nwas compiled against a different Node.js version using"
+               "\nNODE_MODULE_VERSION %d. This version of Node.js requires"
+               "\nNODE_MODULE_VERSION %d. Please try re-compiling or "
+               "re-installing\nthe module (for instance, using `npm rebuild` "
+               "or `npm install`).",
+               *filename, mp->nm_version, NODE_MODULE_VERSION);
+    }
 
     // NOTE: `mp` is allocated inside of the shared library's memory, calling
     // `uv_dlclose` will deallocate it
@@ -2520,9 +2631,7 @@ void FatalException(Isolate* isolate,
 
   if (exit_code) {
 #if HAVE_INSPECTOR
-    if (use_inspector) {
-      env->inspector_agent()->FatalException(error, message);
-    }
+    env->inspector_agent()->FatalException(error, message);
 #endif
     exit(exit_code);
   }
@@ -2562,6 +2671,33 @@ void ClearFatalExceptionHandlers(Environment* env) {
       Undefined(env->isolate())).FromJust();
 }
 
+// Call process.emitWarning(str), fmt is a snprintf() format string
+void ProcessEmitWarning(Environment* env, const char* fmt, ...) {
+  char warning[1024];
+  va_list ap;
+
+  va_start(ap, fmt);
+  vsnprintf(warning, sizeof(warning), fmt, ap);
+  va_end(ap);
+
+  HandleScope handle_scope(env->isolate());
+  Context::Scope context_scope(env->context());
+
+  Local<Object> process = env->process_object();
+  MaybeLocal<Value> emit_warning = process->Get(env->context(),
+      FIXED_ONE_BYTE_STRING(env->isolate(), "emitWarning"));
+  Local<Value> arg = node::OneByteString(env->isolate(), warning);
+
+  Local<Value> f;
+
+  if (!emit_warning.ToLocal(&f)) return;
+  if (!f->IsFunction()) return;
+
+  // MakeCallback() unneeded, because emitWarning is internal code, it calls
+  // process.emit('warning', ..), but does so on the nextTick.
+  f.As<v8::Function>()->Call(process, 1, &arg);
+}
+
 
 static void Binding(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
@@ -2598,6 +2734,8 @@ static void Binding(const FunctionCallbackInfo<Value>& args) {
     cache->Set(module, exports);
   } else if (!strcmp(*module_v, "constants")) {
     exports = Object::New(env->isolate());
+    CHECK(exports->SetPrototype(env->context(),
+                                Null(env->isolate())).FromJust());
     DefineConstants(env->isolate(), exports);
     cache->Set(module, exports);
   } else if (!strcmp(*module_v, "natives")) {
@@ -2679,9 +2817,12 @@ static void ProcessTitleSetter(Local<Name> property,
 
 
 #ifndef UWP_DLL
-static void EnvGetter(Local<String> property,
+static void EnvGetter(Local<Name> property,
                       const PropertyCallbackInfo<Value>& info) {
   Isolate* isolate = info.GetIsolate();
+  if (property->IsSymbol()) {
+    return info.GetReturnValue().SetUndefined();
+  }
 #ifdef __POSIX__
   node::Utf8Value key(isolate, property);
   const char* val = getenv(*key);
@@ -2689,7 +2830,7 @@ static void EnvGetter(Local<String> property,
     return info.GetReturnValue().Set(String::NewFromUtf8(isolate, val));
   }
 #else  // _WIN32
-  String::Value key(property);
+  node::TwoByteValue key(isolate, property);
   WCHAR buffer[32767];  // The maximum size allowed for environment variables.
   DWORD result = GetEnvironmentVariableW(reinterpret_cast<WCHAR*>(*key),
                                          buffer,
@@ -2707,7 +2848,7 @@ static void EnvGetter(Local<String> property,
 }
 
 
-static void EnvSetter(Local<String> property,
+static void EnvSetter(Local<Name> property,
                       Local<Value> value,
                       const PropertyCallbackInfo<Value>& info) {
 #ifdef __POSIX__
@@ -2715,55 +2856,59 @@ static void EnvSetter(Local<String> property,
   node::Utf8Value val(info.GetIsolate(), value);
   setenv(*key, *val, 1);
 #else  // _WIN32
-  String::Value key(property);
-  String::Value val(value);
+  node::TwoByteValue key(info.GetIsolate(), property);
+  node::TwoByteValue val(info.GetIsolate(), value);
   WCHAR* key_ptr = reinterpret_cast<WCHAR*>(*key);
   // Environment variables that start with '=' are read-only.
   if (key_ptr[0] != L'=') {
     SetEnvironmentVariableW(key_ptr, reinterpret_cast<WCHAR*>(*val));
   }
 #endif
-  // Whether it worked or not, always return rval.
+  // Whether it worked or not, always return value.
   info.GetReturnValue().Set(value);
 }
 
 
-static void EnvQuery(Local<String> property,
+static void EnvQuery(Local<Name> property,
                      const PropertyCallbackInfo<Integer>& info) {
   int32_t rc = -1;  // Not found unless proven otherwise.
+  if (property->IsString()) {
 #ifdef __POSIX__
-  node::Utf8Value key(info.GetIsolate(), property);
-  if (getenv(*key))
-    rc = 0;
+    node::Utf8Value key(info.GetIsolate(), property);
+    if (getenv(*key))
+      rc = 0;
 #else  // _WIN32
-  String::Value key(property);
-  WCHAR* key_ptr = reinterpret_cast<WCHAR*>(*key);
-  if (GetEnvironmentVariableW(key_ptr, nullptr, 0) > 0 ||
-      GetLastError() == ERROR_SUCCESS) {
-    rc = 0;
-    if (key_ptr[0] == L'=') {
-      // Environment variables that start with '=' are hidden and read-only.
-      rc = static_cast<int32_t>(v8::ReadOnly) |
-           static_cast<int32_t>(v8::DontDelete) |
-           static_cast<int32_t>(v8::DontEnum);
+    node::TwoByteValue key(info.GetIsolate(), property);
+    WCHAR* key_ptr = reinterpret_cast<WCHAR*>(*key);
+    if (GetEnvironmentVariableW(key_ptr, nullptr, 0) > 0 ||
+        GetLastError() == ERROR_SUCCESS) {
+      rc = 0;
+      if (key_ptr[0] == L'=') {
+        // Environment variables that start with '=' are hidden and read-only.
+        rc = static_cast<int32_t>(v8::ReadOnly) |
+             static_cast<int32_t>(v8::DontDelete) |
+             static_cast<int32_t>(v8::DontEnum);
+      }
     }
-  }
 #endif
+  }
   if (rc != -1)
     info.GetReturnValue().Set(rc);
 }
 
 
-static void EnvDeleter(Local<String> property,
+static void EnvDeleter(Local<Name> property,
                        const PropertyCallbackInfo<Boolean>& info) {
+  if (property->IsString()) {
 #ifdef __POSIX__
-  node::Utf8Value key(info.GetIsolate(), property);
-  unsetenv(*key);
+    node::Utf8Value key(info.GetIsolate(), property);
+    unsetenv(*key);
 #else
-  String::Value key(property);
-  WCHAR* key_ptr = reinterpret_cast<WCHAR*>(*key);
-  SetEnvironmentVariableW(key_ptr, nullptr);
+    node::TwoByteValue key(info.GetIsolate(), property);
+    WCHAR* key_ptr = reinterpret_cast<WCHAR*>(*key);
+    SetEnvironmentVariableW(key_ptr, nullptr);
 #endif
+  }
 
   // process.env never has non-configurable properties, so always
   // return true like the tc39 delete operator.
@@ -2858,7 +3003,7 @@ static Local<Object> GetFeatures(Environment* env) {
   // TODO(bnoordhuis) ping libuv
   obj->Set(FIXED_ONE_BYTE_STRING(env->isolate(), "ipv6"), True(env->isolate()));
 
-#ifdef OPENSSL_NPN_NEGOTIATED
+#ifndef OPENSSL_NO_NEXTPROTONEG
   Local<Boolean> tls_npn = True(env->isolate());
 #else
   Local<Boolean> tls_npn = False(env->isolate());
@@ -2896,14 +3041,14 @@ static Local<Object> GetFeatures(Environment* env) {
 
 static void DebugPortGetter(Local<Name> property,
                             const PropertyCallbackInfo<Value>& info) {
-  info.GetReturnValue().Set(debug_port);
+  info.GetReturnValue().Set(debug_options.port());
 }
 
 
 static void DebugPortSetter(Local<Name> property,
                             Local<Value> value,
                             const PropertyCallbackInfo<void>& info) {
-  debug_port = value->Int32Value();
+  debug_options.set_port(value->Int32Value());
 }
 
 
@@ -3040,19 +3185,6 @@ void SetupProcessObject(Environment* env,
                     "ares",
                     FIXED_ONE_BYTE_STRING(env->isolate(), ARES_VERSION_STR));
 
-#if defined(NODE_HAVE_I18N_SUPPORT) && defined(U_ICU_VERSION)
-  READONLY_PROPERTY(versions,
-                    "icu",
-                    OneByteString(env->isolate(), U_ICU_VERSION));
-
-  if (icu_data_dir != nullptr) {
-    // Did the user attempt (via env var or parameter) to set an ICU path?
-    READONLY_PROPERTY(process,
-                      "icu_data_dir",
-                      OneByteString(env->isolate(), icu_data_dir));
-  }
-#endif
-
   const char node_modules_version[] = NODE_STRINGIFY(NODE_MODULE_VERSION);
   READONLY_PROPERTY(
       versions,
@@ -3159,12 +3291,14 @@ void SetupProcessObject(Environment* env,
 #ifndef UWP_DLL
   Local<ObjectTemplate> process_env_template =
       ObjectTemplate::New(env->isolate());
-  process_env_template->SetNamedPropertyHandler(EnvGetter,
-                                                EnvSetter,
-                                                EnvQuery,
-                                                EnvDeleter,
-                                                EnvEnumerator,
-                                                env->as_external());
+  process_env_template->SetHandler(NamedPropertyHandlerConfiguration(
+          EnvGetter,
+          EnvSetter,
+          EnvQuery,
+          EnvDeleter,
+          EnvEnumerator,
+          env->as_external()));
+
   Local<Object> process_env =
       process_env_template->NewInstance(env->context()).ToLocalChecked();
 #else
@@ -3257,7 +3391,7 @@ void SetupProcessObject(Environment* env,
   }
 
   // --debug-brk
-  if (debug_wait_connect) {
+  if (debug_options.wait_for_connect()) {
     READONLY_PROPERTY(process, "_debugWaitConnect", True(env->isolate()));
   }
 #if defined(UWP_DLL)
@@ -3366,13 +3500,11 @@ void SetupProcessObject(Environment* env,
 #undef READONLY_PROPERTY
 
 
-static void AtProcessExit() {
-  uv_tty_reset_mode();
-}
-
-
 void SignalExit(int signo) {
   uv_tty_reset_mode();
+  if (trace_enabled) {
+    v8_platform.StopTracingAgent();
+  }
 #ifdef __FreeBSD__
   // FreeBSD has a nasty bug, see RegisterSignalHandler for details
   struct sigaction sa;
@@ -3399,11 +3531,6 @@ static void RawDebug(const FunctionCallbackInfo<Value>& args) {
 
 void LoadEnvironment(Environment* env) {
   HandleScope handle_scope(env->isolate());
-
-  env->isolate()->SetFatalErrorHandler(node::OnFatalError);
-  env->isolate()->AddMessageListener(OnMessage);
-
-  atexit(AtProcessExit);
 
   TryCatch try_catch(env->isolate());
 
@@ -3445,7 +3572,7 @@ void LoadEnvironment(Environment* env) {
   // (FatalException(), break on uncaught exception in debugger)
   //
   // This is not strictly necessary since it's almost impossible
-  // to attach the debugger fast enought to break on exception
+  // to attach the debugger fast enough to break on exception
   // thrown during process startup.
   try_catch.SetVerbose(true);
 
@@ -3456,170 +3583,153 @@ void LoadEnvironment(Environment* env) {
   global->Set(FIXED_ONE_BYTE_STRING(env->isolate(), "global"), global);
 
   // Now we call 'f' with the 'process' variable that we've built up with
-  // all our bindings. Inside bootstrap_node.js we'll take care of
-  // assigning things to their places.
+  // all our bindings. Inside bootstrap_node.js and internal/process we'll
+  // take care of assigning things to their places.
 
   // We start the process this way in order to be more modular. Developers
-  // who do not like how bootstrap_node.js setups the module system but do
+  // who do not like how bootstrap_node.js sets up the module system but do
   // like Node's I/O bindings may want to replace 'f' with their own function.
   Local<Value> arg = env->process_object();
   f->Call(Null(env->isolate()), 1, &arg);
 }
 
-
-static void PrintHelp();
-
-static bool ParseDebugOpt(const char* arg) {
-  const char* port = nullptr;
-
-  if (!strcmp(arg, "--debug")) {
-    use_debug_agent = true;
-  } else if (!strncmp(arg, "--debug=", sizeof("--debug=") - 1)) {
-    use_debug_agent = true;
-    port = arg + sizeof("--debug=") - 1;
-  } else if (!strcmp(arg, "--debug-brk")) {
-    use_debug_agent = true;
-    debug_wait_connect = true;
-  } else if (!strncmp(arg, "--debug-brk=", sizeof("--debug-brk=") - 1)) {
-    use_debug_agent = true;
-    debug_wait_connect = true;
-    port = arg + sizeof("--debug-brk=") - 1;
-  } else if (!strncmp(arg, "--debug-port=", sizeof("--debug-port=") - 1)) {
-    // XXX(bnoordhuis) Misnomer, configures port and listen address.
-    port = arg + sizeof("--debug-port=") - 1;
-#if HAVE_INSPECTOR
-  // Specifying both --inspect and --debug means debugging is on, using Chromium
-  // inspector.
-  } else if (!strcmp(arg, "--inspect")) {
-    use_debug_agent = true;
-    use_inspector = true;
-  } else if (!strncmp(arg, "--inspect=", sizeof("--inspect=") - 1)) {
-    use_debug_agent = true;
-    use_inspector = true;
-    port = arg + sizeof("--inspect=") - 1;
-#else
-  } else if (!strncmp(arg, "--inspect", sizeof("--inspect") - 1)) {
-    fprintf(stderr,
-            "Inspector support is not available with this Node.js build\n");
-    return false;
-#endif
-  } else {
-    return false;
-  }
-
-  if (port == nullptr) {
-    return true;
-  }
-
-  std::string** const the_host = use_inspector ? &inspector_host : &debug_host;
-  int* const the_port = use_inspector ? &inspector_port : &debug_port;
-
-  // FIXME(bnoordhuis) Move IPv6 address parsing logic to lib/net.js.
-  // It seems reasonable to support [address]:port notation
-  // in net.Server#listen() and net.Socket#connect().
-  const size_t port_len = strlen(port);
-  if (port[0] == '[' && port[port_len - 1] == ']') {
-    *the_host = new std::string(port + 1, port_len - 2);
-    return true;
-  }
-
-  const char* const colon = strrchr(port, ':');
-  if (colon == nullptr) {
-    // Either a port number or a host name.  Assume that
-    // if it's not all decimal digits, it's a host name.
-    for (size_t n = 0; port[n] != '\0'; n += 1) {
-      if (port[n] < '0' || port[n] > '9') {
-        *the_host = new std::string(port);
-        return true;
-      }
-    }
-  } else {
-    const bool skip = (colon > port && port[0] == '[' && colon[-1] == ']');
-    *the_host = new std::string(port + skip, colon - skip);
-  }
-
-  char* endptr;
-  errno = 0;
-  const char* const digits = colon != nullptr ? colon + 1 : port;
-  const long result = strtol(digits, &endptr, 10);  // NOLINT(runtime/int)
-  if (errno != 0 || *endptr != '\0' || result < 1024 || result > 65535) {
-    fprintf(stderr, "Debug port must be in range 1024 to 65535.\n");
-    PrintHelp();
-    exit(12);
-  }
-
-  *the_port = static_cast<int>(result);
-
-  return true;
-}
-
 static void PrintHelp() {
   // XXX: If you add an option here, please also add it to doc/node.1 and
   // doc/api/cli.md
-  printf("Usage: node [options] [ -e script | script.js ] [arguments] \n"
-         "       node debug script.js [arguments] \n"
+  printf("Usage: node [options] [ -e script | script.js ] [arguments]\n"
+         "       node debug script.js [arguments]\n"
          "\n"
          "Options:\n"
-         "  -v, --version         print Node.js version\n"
-         "  -e, --eval script     evaluate script\n"
-         "  -p, --print           evaluate script and print result\n"
-         "  -c, --check           syntax check script without executing\n"
-         "  -i, --interactive     always enter the REPL even if stdin\n"
-         "                        does not appear to be a terminal\n"
-         "  -r, --require         module to preload (option can be repeated)\n"
-         "  --no-deprecation      silence deprecation warnings\n"
-         "  --trace-deprecation   show stack traces on deprecations\n"
-         "  --throw-deprecation   throw an exception anytime a deprecated "
-         "function is used\n"
-         "  --no-warnings         silence all process warnings\n"
-         "  --trace-warnings      show stack traces on process warnings\n"
-         "  --trace-sync-io       show stack trace when use of sync IO\n"
-         "                        is detected after the first tick\n"
-         "  --track-heap-objects  track heap object allocations for heap "
+         "  -v, --version              print Node.js version\n"
+         "  -e, --eval script          evaluate script\n"
+         "  -p, --print                evaluate script and print result\n"
+         "  -c, --check                syntax check script without executing\n"
+         "  -i, --interactive          always enter the REPL even if stdin\n"
+         "                             does not appear to be a terminal\n"
+         "  -r, --require              module to preload (option can be "
+         "repeated)\n"
+#if HAVE_INSPECTOR
+         "  --inspect[=[host:]port]    activate inspector on host:port\n"
+         "                             (default: 127.0.0.1:9229)\n"
+         "  --inspect-brk[=[host:]port]\n"
+         "                             activate inspector on host:port\n"
+         "                             and break at start of user script\n"
+#endif
+         "  --no-deprecation           silence deprecation warnings\n"
+         "  --trace-deprecation        show stack traces on deprecations\n"
+         "  --throw-deprecation        throw an exception on deprecations\n"
+         "  --no-warnings              silence all process warnings\n"
+         "  --napi-modules             load N-API modules\n"
+         "  --trace-warnings           show stack traces on process warnings\n"
+         "  --redirect-warnings=path\n"
+         "                             write warnings to path instead of\n"
+         "                             stderr\n"
+         "  --trace-sync-io            show stack trace when use of sync IO\n"
+         "                             is detected after the first tick\n"
+         "  --trace-events-enabled     track trace events\n"
+         "  --trace-event-categories   comma separated list of trace event\n"
+         "                             categories to record\n"
+#if ENABLE_TTD_NODE
+         "  --record                 enable diagnostics record mode\n"
+         "  --record-interval=num    interval between snapshots in recording\n"
+         "                           (in milliseconds) defaults to 2 seconds\n"
+         "  --record-history=num     number of snapshots retained in log \n"
+         "                           during recording (deafults to 2)\n"
+         "  --replay=dir             replay execution from recording log\n"
+         "  --replay-debug=dir       replay and debug using recording log\n"
+         "  --break-first            break at first statement when running\n"
+         "                           in --replay-debug mode\n"
+ #endif
+         "  --track-heap-objects       track heap object allocations for heap "
          "snapshots\n"
-         "  --prof-process        process v8 profiler output generated\n"
-         "                        using --prof\n"
-         "  --zero-fill-buffers   automatically zero-fill all newly allocated\n"
-         "                        Buffer and SlowBuffer instances\n"
-         "  --v8-options          print v8 command line options\n"
-         "  --v8-pool-size=num    set v8's thread pool size\n"
+         "  --prof-process             process v8 profiler output generated\n"
+         "                             using --prof\n"
+         "  --zero-fill-buffers        automatically zero-fill all newly "
+         "allocated\n"
+         "                             Buffer and SlowBuffer instances\n"
+         "  --v8-options               print v8 command line options\n"
+         "  --v8-pool-size=num         set v8's thread pool size\n"
 #if HAVE_OPENSSL
-         "  --tls-cipher-list=val use an alternative default TLS cipher list\n"
+         "  --tls-cipher-list=val      use an alternative default TLS cipher "
+         "list\n"
+         "  --use-bundled-ca           use bundled CA store"
+#if !defined(NODE_OPENSSL_CERT_STORE)
+         " (default)"
+#endif
+         "\n"
+         "  --use-openssl-ca           use OpenSSL's default CA store"
+#if defined(NODE_OPENSSL_CERT_STORE)
+         " (default)"
+#endif
+         "\n"
 #if NODE_FIPS_MODE
-         "  --enable-fips         enable FIPS crypto at startup\n"
-         "  --force-fips          force FIPS crypto (cannot be disabled)\n"
+         "  --enable-fips              enable FIPS crypto at startup\n"
+         "  --force-fips               force FIPS crypto (cannot be disabled)\n"
 #endif  /* NODE_FIPS_MODE */
+         "  --openssl-config=file      load OpenSSL configuration from the\n"
+         "                             specified file (overrides\n"
+         "                             OPENSSL_CONF)\n"
 #endif /* HAVE_OPENSSL */
 #if defined(NODE_HAVE_I18N_SUPPORT)
-         "  --icu-data-dir=dir    set ICU data load path to dir\n"
-         "                        (overrides NODE_ICU_DATA)\n"
+         "  --icu-data-dir=dir         set ICU data load path to dir\n"
+         "                             (overrides NODE_ICU_DATA)\n"
 #if !defined(NODE_HAVE_SMALL_ICU)
-         "                        note: linked-in ICU data is\n"
-         "                        present.\n"
+         "                             note: linked-in ICU data is present\n"
 #endif
-         "  --preserve-symlinks   preserve symbolic links when resolving\n"
-         "                        and caching modules.\n"
+         "  --preserve-symlinks        preserve symbolic links when resolving\n"
+         "                             and caching modules\n"
 #endif
          "\n"
          "Environment variables:\n"
-#ifdef _WIN32
-         "NODE_PATH                ';'-separated list of directories\n"
-#else
-         "NODE_PATH                ':'-separated list of directories\n"
-#endif
-         "                         prefixed to the module search path.\n"
-         "NODE_DISABLE_COLORS      set to 1 to disable colors in the REPL\n"
+         "NODE_DEBUG                   ','-separated list of core modules\n"
+         "                             that should print debug information\n"
+         "NODE_DISABLE_COLORS          set to 1 to disable colors in the REPL\n"
+         "NODE_EXTRA_CA_CERTS          path to additional CA certificates\n"
+         "                             file\n"
 #if defined(NODE_HAVE_I18N_SUPPORT)
-         "NODE_ICU_DATA            data path for ICU (Intl object) data\n"
+         "NODE_ICU_DATA                data path for ICU (Intl object) data\n"
 #if !defined(NODE_HAVE_SMALL_ICU)
-         "                         (will extend linked-in data)\n"
+         "                             (will extend linked-in data)\n"
 #endif
 #endif
-         "NODE_REPL_HISTORY        path to the persistent REPL history file\n"
+         "NODE_NO_WARNINGS             set to 1 to silence process warnings\n"
+#ifdef _WIN32
+         "NODE_PATH                    ';'-separated list of directories\n"
+#else
+         "NODE_PATH                    ':'-separated list of directories\n"
+#endif
+         "                             prefixed to the module search path\n"
+         "NODE_REPL_HISTORY            path to the persistent REPL history\n"
+         "                             file\n"
+         "NODE_REDIRECT_WARNINGS       write warnings to path instead of\n"
+         "                             stderr\n"
+         "OPENSSL_CONF                 load OpenSSL configuration from file\n"
          "\n"
+#if ENABLE_TTD_NODE
+         "Documentation can be found at https://nodejs.org/\n"
+         "Record/Replay diagnostics info at http://aka.ms/nodettd\n");
+#else
          "Documentation can be found at https://nodejs.org/\n");
+#endif
 }
 
+#if ENABLE_TTD_NODE
+void TTDFlagWarning(const char* arg, const char* newflag) {
+    fprintf(stderr, "Flag %s is deprecated use %s\n", arg, newflag);
+    fprintf(stderr, "Run with \"-h\" for help with flags.\n");
+
+    exit(1);
+}
+
+void TTDFlagWarning_Cond(bool cond, const char* msg) {
+  if (!cond) {
+    fprintf(stderr, "%s\n", msg);
+    fprintf(stderr, "Run with \"-h\" for help with flags.\n");
+
+    exit(1);
+  }
+}
+#endif
 
 // Parse command line arguments.
 //
@@ -3643,6 +3753,8 @@ static void ParseArgs(int* argc,
   const char** new_v8_argv = new const char*[nargs];
   const char** new_argv = new const char*[nargs];
   const char** local_preload_modules = new const char*[nargs];
+  bool use_bundled_ca = false;
+  bool use_openssl_ca = false;
 
   for (unsigned int i = 0; i < nargs; ++i) {
     new_exec_argv[i] = nullptr;
@@ -3664,8 +3776,8 @@ static void ParseArgs(int* argc,
     const char* const arg = argv[index];
     unsigned int args_consumed = 1;
 
-    if (ParseDebugOpt(arg)) {
-      // Done, consumed by ParseDebugOpt().
+    if (debug_options.ParseOption(arg)) {
+      // Done, consumed by DebugOptions::ParseOption().
     } else if (strcmp(arg, "--version") == 0 || strcmp(arg, "-v") == 0) {
       printf("%s\n", NODE_VERSION);
       exit(0);
@@ -3713,14 +3825,63 @@ static void ParseArgs(int* argc,
       force_repl = true;
     } else if (strcmp(arg, "--no-deprecation") == 0) {
       no_deprecation = true;
+    } else if (strcmp(arg, "--napi-modules") == 0) {
+      load_napi_modules = true;
     } else if (strcmp(arg, "--no-warnings") == 0) {
       no_process_warnings = true;
     } else if (strcmp(arg, "--trace-warnings") == 0) {
       trace_warnings = true;
+    } else if (strncmp(arg, "--redirect-warnings=", 20) == 0) {
+      config_warning_file = arg + 20;
     } else if (strcmp(arg, "--trace-deprecation") == 0) {
       trace_deprecation = true;
     } else if (strcmp(arg, "--trace-sync-io") == 0) {
       trace_sync_io = true;
+    } else if (strcmp(arg, "--trace-events-enabled") == 0) {
+      trace_enabled = true;
+    } else if (strcmp(arg, "--trace-event-categories") == 0) {
+      const char* categories = argv[index + 1];
+      if (categories == nullptr) {
+        fprintf(stderr, "%s: %s requires an argument\n", argv[0], arg);
+        exit(9);
+      }
+      args_consumed += 1;
+      trace_enabled_categories = categories;
+#if ENABLE_TTD_NODE
+      // Parse and extract the TT args
+      } else if (strcmp(arg, "--record") == 0) {
+          s_doTTRecord = true;
+      } else if (strstr(arg, "--replay=") == arg) {
+          s_doTTReplay = true;
+          s_ttoptReplayUri = arg + strlen("--replay=");
+          s_ttoptReplayUriLength = strlen(s_ttoptReplayUri);
+      } else if (strstr(arg, "--replay-debug=") == arg) {
+          s_doTTReplay = true;
+          s_doTTDebug = true;
+          s_ttoptReplayUri = arg + strlen("--replay-debug=");
+          s_ttoptReplayUriLength = strlen(s_ttoptReplayUri);
+      } else if (strcmp(arg, "--break-first") == 0) {
+          s_ttdStartupMode = (0x100 | 0x1);
+          debug_options.do_wait_for_connect();
+      } else if (strstr(arg, "--record-interval=") == arg) {
+          const char* intervalStr = arg + strlen("--record-interval=");
+          s_ttdSnapInterval = (uint32_t)atoi(intervalStr);
+      } else if (strstr(arg, "--record-history=") == arg) {
+          const char* historyStr = arg + strlen("--record-history=");
+          s_ttdSnapHistoryLength = (uint32_t)atoi(historyStr);
+      } else if (strstr(arg, "-TTRecord:") == arg) {
+          TTDFlagWarning(arg, "--record");
+      } else if (strstr(arg, "-TTReplay:") == arg) {
+          TTDFlagWarning(arg, "--replay=dir");
+      } else if (strstr(arg, "-TTDebug:") == arg) {
+          TTDFlagWarning(arg, "--replay-debug=dir");
+      } else if (strstr(arg, "-TTBreakFirst") == arg) {
+          TTDFlagWarning(arg, "--break-first");
+      } else if (strstr(arg, "-TTSnapInterval:") == arg) {
+          TTDFlagWarning(arg, "--record-interval=num");
+      } else if (strstr(arg, "-TTHistoryLength:") == arg) {
+          TTDFlagWarning(arg, "--record-history=num");
+#endif
     } else if (strcmp(arg, "--track-heap-objects") == 0) {
       track_heap_objects = true;
     } else if (strcmp(arg, "--throw-deprecation") == 0) {
@@ -3743,20 +3904,31 @@ static void ParseArgs(int* argc,
 #if HAVE_OPENSSL
     } else if (strncmp(arg, "--tls-cipher-list=", 18) == 0) {
       default_cipher_list = arg + 18;
+    } else if (strncmp(arg, "--use-openssl-ca", 16) == 0) {
+      ssl_openssl_cert_store = true;
+      use_openssl_ca = true;
+    } else if (strncmp(arg, "--use-bundled-ca", 16) == 0) {
+      use_bundled_ca = true;
+      ssl_openssl_cert_store = false;
 #if NODE_FIPS_MODE
     } else if (strcmp(arg, "--enable-fips") == 0) {
       enable_fips_crypto = true;
     } else if (strcmp(arg, "--force-fips") == 0) {
       force_fips_crypto = true;
 #endif /* NODE_FIPS_MODE */
+    } else if (strncmp(arg, "--openssl-config=", 17) == 0) {
+      openssl_config.assign(arg + 17);
 #endif /* HAVE_OPENSSL */
 #if defined(NODE_HAVE_I18N_SUPPORT)
     } else if (strncmp(arg, "--icu-data-dir=", 15) == 0) {
-      icu_data_dir = arg + 15;
+      icu_data_dir.assign(arg + 15);
 #endif
     } else if (strcmp(arg, "--expose-internals") == 0 ||
                strcmp(arg, "--expose_internals") == 0) {
       // consumed in js
+    } else if (strcmp(arg, "--") == 0) {
+      index += 1;
+      break;
     } else {
       // V8 option.  Pass through as-is.
       new_v8_argv[new_v8_argc] = arg;
@@ -3769,6 +3941,22 @@ static void ParseArgs(int* argc,
 
     new_exec_argc += args_consumed;
     index += args_consumed;
+  }
+
+#if HAVE_OPENSSL
+  if (use_openssl_ca && use_bundled_ca) {
+    fprintf(stderr,
+            "%s: either --use-openssl-ca or --use-bundled-ca can be used, "
+            "not both\n",
+            argv[0]);
+    exit(9);
+  }
+#endif
+
+  if (eval_string != nullptr && syntax_check_only) {
+    fprintf(stderr,
+            "%s: either --check or --eval can be used, not both\n", argv[0]);
+    exit(9);
   }
 
   // Copy remaining arguments.
@@ -3805,12 +3993,10 @@ static void DispatchMessagesDebugAgentCallback(Environment* env) {
 }
 
 
-static void StartDebug(Environment* env, const char* path, bool wait) {
+static void StartDebug(Environment* env, const char* path,
+                       DebugOptions debug_options) {
   CHECK(!debugger_running);
-  if (use_inspector) {
-    debugger_running = v8_platform.StartInspector(env, path, inspector_port,
-                                                  wait);
-  } else {
+  if (debug_options.debugger_enabled()) {
     env->debugger_agent()->set_dispatch_handler(
           DispatchMessagesDebugAgentCallback);
     const char* host = debug_host ? debug_host->c_str() : "127.0.0.1";
@@ -3822,10 +4008,14 @@ static void StartDebug(Environment* env, const char* path, bool wait) {
           env->debugger_agent()->Start(host, debug_port, wait);
 #endif
     if (debugger_running == false) {
-      fprintf(stderr, "Starting debugger on %s:%d failed\n", host, debug_port);
+      fprintf(stderr, "Starting debugger on %s:%d failed\n",
+              debug_options.host_name().c_str(), debug_options.port());
       fflush(stderr);
-      return;
     }
+#if HAVE_INSPECTOR
+  } else {
+    debugger_running = v8_platform.StartInspector(env, path, debug_options);
+#endif  // HAVE_INSPECTOR
   }
 }
 
@@ -3833,10 +4023,6 @@ static void StartDebug(Environment* env, const char* path, bool wait) {
 // Called from the main thread.
 static void EnableDebug(Environment* env) {
   CHECK(debugger_running);
-  
-  if (use_inspector) {
-    return;
-  }
 
   // Send message to enable debug in workers
   HandleScope handle_scope(env->isolate());
@@ -3852,16 +4038,6 @@ static void EnableDebug(Environment* env) {
 
   // Enabled debugger, possibly making it wait on a semaphore
   env->debugger_agent()->Enable();
-}
-
-
-// Called from an arbitrary thread.
-static void TryStartDebugger() {
-  Mutex::ScopedLock scoped_lock(node_isolate_mutex);
-  if (auto isolate = node_isolate) {
-    v8::Debug::DebugBreak(isolate);
-    uv_async_send(&dispatch_debug_messages_async);
-  }
 }
 
 
@@ -3887,11 +4063,6 @@ static void DispatchDebugMessagesAsyncCallback(uv_async_t* handle) {
 
 
 #ifdef __POSIX__
-static void EnableDebugSignalHandler(int signo) {
-  uv_sem_post(&debug_semaphore);
-}
-
-
 void RegisterSignalHandler(int signal,
                            void (*handler)(int signal),
                            bool reset_handler) {
@@ -3925,109 +4096,13 @@ void DebugProcess(const FunctionCallbackInfo<Value>& args) {
     return env->ThrowErrnoException(errno, "kill");
   }
 }
-
-
-inline void* DebugSignalThreadMain(void* unused) {
-  for (;;) {
-    uv_sem_wait(&debug_semaphore);
-    TryStartDebugger();
-  }
-  return nullptr;
-}
-
-
-static int RegisterDebugSignalHandler() {
-  // Start a watchdog thread for calling v8::Debug::DebugBreak() because
-  // it's not safe to call directly from the signal handler, it can
-  // deadlock with the thread it interrupts.
-  CHECK_EQ(0, uv_sem_init(&debug_semaphore, 0));
-  pthread_attr_t attr;
-  CHECK_EQ(0, pthread_attr_init(&attr));
-  // Don't shrink the thread's stack on FreeBSD.  Said platform decided to
-  // follow the pthreads specification to the letter rather than in spirit:
-  // https://lists.freebsd.org/pipermail/freebsd-current/2014-March/048885.html
-#ifndef __FreeBSD__
-  CHECK_EQ(0, pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN));
-#endif  // __FreeBSD__
-  CHECK_EQ(0, pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED));
-  sigset_t sigmask;
-  sigfillset(&sigmask);
-  CHECK_EQ(0, pthread_sigmask(SIG_SETMASK, &sigmask, &sigmask));
-  pthread_t thread;
-  const int err =
-      pthread_create(&thread, &attr, DebugSignalThreadMain, nullptr);
-  CHECK_EQ(0, pthread_sigmask(SIG_SETMASK, &sigmask, nullptr));
-  CHECK_EQ(0, pthread_attr_destroy(&attr));
-  if (err != 0) {
-    fprintf(stderr, "node[%d]: pthread_create: %s\n", getpid(), strerror(err));
-    fflush(stderr);
-    // Leave SIGUSR1 blocked.  We don't install a signal handler,
-    // receiving the signal would terminate the process.
-    return -err;
-  }
-  RegisterSignalHandler(SIGUSR1, EnableDebugSignalHandler);
-  // Unblock SIGUSR1.  A pending SIGUSR1 signal will now be delivered.
-  sigemptyset(&sigmask);
-  sigaddset(&sigmask, SIGUSR1);
-  CHECK_EQ(0, pthread_sigmask(SIG_UNBLOCK, &sigmask, nullptr));
-  return 0;
-}
 #endif  // __POSIX__
 
 
 #ifdef _WIN32
-DWORD WINAPI EnableDebugThreadProc(void* arg) {
-  TryStartDebugger();
-  return 0;
-}
-
-
 static int GetDebugSignalHandlerMappingName(DWORD pid, wchar_t* buf,
     size_t buf_len) {
   return _snwprintf(buf, buf_len, L"node-debug-handler-%u", pid);
-}
-
-
-static int RegisterDebugSignalHandler() {
-  wchar_t mapping_name[32];
-  HANDLE mapping_handle;
-  DWORD pid;
-  LPTHREAD_START_ROUTINE* handler;
-
-  pid = GetCurrentProcessId();
-
-  if (GetDebugSignalHandlerMappingName(pid,
-                                       mapping_name,
-                                       arraysize(mapping_name)) < 0) {
-    return -1;
-  }
-
-  mapping_handle = CreateFileMappingW(INVALID_HANDLE_VALUE,
-                                      nullptr,
-                                      PAGE_READWRITE,
-                                      0,
-                                      sizeof *handler,
-                                      mapping_name);
-  if (mapping_handle == nullptr) {
-    return -1;
-  }
-
-  handler = reinterpret_cast<LPTHREAD_START_ROUTINE*>(
-      MapViewOfFile(mapping_handle,
-                    FILE_MAP_ALL_ACCESS,
-                    0,
-                    0,
-                    sizeof *handler));
-  if (handler == nullptr) {
-    CloseHandle(mapping_handle);
-    return -1;
-  }
-
-  *handler = EnableDebugThreadProc;
-
-  UnmapViewOfFile(static_cast<void*>(handler));
-
-  return 0;
 }
 
 
@@ -4134,7 +4209,7 @@ static void DebugEnd(const FunctionCallbackInfo<Value>& args) {
   if (debugger_running) {
     Environment* env = Environment::GetCurrent(args);
 #if HAVE_INSPECTOR
-    if (use_inspector) {
+    if (!debug_options.debugger_enabled()) {
       env->inspector_agent()->Stop();
     } else {
 #endif
@@ -4169,6 +4244,7 @@ inline void PlatformInit() {
 
   CHECK_EQ(err, 0);
 
+#ifndef NODE_SHARED_MODE
   // Restore signal dispositions, the parent process may have changed them.
   struct sigaction act;
   memset(&act, 0, sizeof(act));
@@ -4182,6 +4258,7 @@ inline void PlatformInit() {
     act.sa_handler = (nr == SIGPIPE) ? SIG_IGN : SIG_DFL;
     CHECK_EQ(0, sigaction(nr, &act, nullptr));
   }
+#endif  // !NODE_SHARED_MODE
 
   RegisterSignalHandler(SIGINT, SignalExit, true);
   RegisterSignalHandler(SIGTERM, SignalExit, true);
@@ -4207,6 +4284,19 @@ inline void PlatformInit() {
     } while (min + 1 < max);
   }
 #endif  // __POSIX__
+#ifdef _WIN32
+  for (int fd = 0; fd <= 2; ++fd) {
+    auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(fd));
+    if (handle == INVALID_HANDLE_VALUE ||
+        GetFileType(handle) == FILE_TYPE_UNKNOWN) {
+      // Ignore _close result. If it fails or not depends on used Windows
+      // version. We will just check _open result.
+      _close(fd);
+      if (fd != _open("nul", _O_RDWR))
+        ABORT();
+    }
+  }
+#endif  // _WIN32
 }
 
 
@@ -4227,11 +4317,34 @@ void Init(int* argc,
                             DispatchDebugMessagesAsyncCallback));
   uv_unref(reinterpret_cast<uv_handle_t*>(&dispatch_debug_messages_async));
 
+#if defined(NODE_HAVE_I18N_SUPPORT)
+  // Set the ICU casing flag early
+  // so the user can disable a flag --foo at run-time by passing
+  // --no_foo from the command line.
+  const char icu_case_mapping[] = "--icu_case_mapping";
+  V8::SetFlagsFromString(icu_case_mapping, sizeof(icu_case_mapping) - 1);
+#endif
+
 #if defined(NODE_V8_OPTIONS)
   // Should come before the call to V8::SetFlagsFromCommandLine()
   // so the user can disable a flag --foo at run-time by passing
   // --no_foo from the command line.
   V8::SetFlagsFromString(NODE_V8_OPTIONS, sizeof(NODE_V8_OPTIONS) - 1);
+#endif
+
+  // Allow for environment set preserving symlinks.
+  {
+    std::string text;
+    config_preserve_symlinks =
+        SafeGetenv("NODE_PRESERVE_SYMLINKS", &text) && text[0] == '1';
+  }
+
+  if (config_warning_file.empty())
+    SafeGetenv("NODE_REDIRECT_WARNINGS", &config_warning_file);
+
+#if HAVE_OPENSSL
+  if (openssl_config.empty())
+    SafeGetenv("OPENSSL_CONF", &openssl_config);
 #endif
 
   // Parse a few arguments which are specific to Node.
@@ -4260,12 +4373,11 @@ void Init(int* argc,
 #endif
 
 #if defined(NODE_HAVE_I18N_SUPPORT)
-  if (icu_data_dir == nullptr) {
-    // if the parameter isn't given, use the env variable.
-    icu_data_dir = secure_getenv("NODE_ICU_DATA");
-  }
+  // If the parameter isn't given, use the env variable.
+  if (icu_data_dir.empty())
+    SafeGetenv("NODE_ICU_DATA", &icu_data_dir);
   // Initialize ICU.
-  // If icu_data_dir is nullptr here, it will load the 'minimal' data.
+  // If icu_data_dir is empty here, it will load the 'minimal' data.
   if (!i18n::InitializeICUDirectory(icu_data_dir)) {
     FatalError(nullptr, "Could not initialize ICU "
                      "(check NODE_ICU_DATA or --icu-data-dir parameters)");
@@ -4287,15 +4399,20 @@ void Init(int* argc,
     exit(9);
   }
 
+  // CHAKRA-TODO : fix this to not do it here
+#ifdef NODE_ENGINE_CHAKRACORE
+  if (debug_options.inspector_enabled()) {
+    v8::Debug::EnableInspector();
+  } else if (debug_options.debugger_enabled()) {
+    v8::Debug::EnableDebug();
+  }
+#endif
+
   // Unconditionally force typed arrays to allocate outside the v8 heap. This
   // is to prevent memory pointers from being moved around that are returned by
   // Buffer::Data().
   const char no_typed_array_heap[] = "--typed_array_max_size_in_heap=0";
   V8::SetFlagsFromString(no_typed_array_heap, sizeof(no_typed_array_heap) - 1);
-
-  if (!use_debug_agent) {
-    RegisterDebugSignalHandler();
-  }
 
   // We should set node_is_initialized here instead of in node::Start,
   // otherwise embedders using node::Init to initialize everything will not be
@@ -4400,31 +4517,159 @@ void FreeEnvironment(Environment* env) {
   delete env;
 }
 
+#ifdef NODE_ENGINE_CHAKRACORE
+struct ChakraShimIsolateContext {
+  ChakraShimIsolateContext(uv_loop_t* event_loop, uint32_t* zero_fill_field)
+      : event_loop(event_loop),
+        zero_fill_field(zero_fill_field)
+  {}
 
-// Entry point for new node instances, also called directly for the main
-// node instance.
-static void StartNodeInstance(void* arg) {
-  NodeInstanceData* instance_data = static_cast<NodeInstanceData*>(arg);
+  uv_loop_t* event_loop;
+  uint32_t*  zero_fill_field;
+};
+#endif
+
+inline int Start(Isolate* isolate, void* isolate_context,
+                 int argc, const char* const* argv,
+                 int exec_argc, const char* const* exec_argv) {
+  HandleScope handle_scope(isolate);
+
+#if ENABLE_TTD_NODE
+  Local<Context> context = Context::New(isolate, s_doTTRecord);
+#else
+  Local<Context> context = Context::New(isolate);
+#endif
+
+  Context::Scope context_scope(context);
+
+#ifdef NODE_ENGINE_CHAKRACORE
+  ChakraShimIsolateContext* chakra_isolate_context =
+    reinterpret_cast<ChakraShimIsolateContext*>(isolate_context);
+
+  IsolateData data(isolate, chakra_isolate_context->event_loop,
+    chakra_isolate_context->zero_fill_field);
+  IsolateData* isolate_data = &data;
+#else
+  IsolateData* isolate_data = reinterpret_cast<IsolateData*>(isolate_context);
+#endif
+
+  Environment env(isolate_data, context);
+  env.Start(argc, argv, exec_argc, exec_argv, v8_is_profiling);
+
+  const char* path = argc > 1 ? argv[1] : nullptr;
+  StartDebug(&env, path, debug_options);
+
+  bool debugger_enabled =
+      debug_options.debugger_enabled() || debug_options.inspector_enabled();
+  if (debugger_enabled && !debugger_running)
+    return 12;  // Signal internal error.
+
+  {
+    Environment::AsyncCallbackScope callback_scope(&env);
+    LoadEnvironment(&env);
+  }
+
+#if ENABLE_TTD_NODE
+  // Start time travel after environment is loaded
+  if (s_doTTRecord) {
+    fprintf(stderr, "Recording started (after main module loaded)...\n");
+    JsTTDStart();
+  }
+#endif
+
+  env.set_trace_sync_io(trace_sync_io);
+
+  // Enable debugger
+  if (debug_options.debugger_enabled())
+    EnableDebug(&env);
+
+  if (load_napi_modules) {
+    ProcessEmitWarning(&env, "N-API is an experimental feature "
+        "and could change at any time.");
+  }
+
+  {
+    SealHandleScope seal(isolate);
+    bool more;
+    do {
+      v8_platform.PumpMessageLoop(isolate);
+      more = uv_run(env.event_loop(), UV_RUN_ONCE);
+
+      if (more == false) {
+        v8_platform.PumpMessageLoop(isolate);
+        EmitBeforeExit(&env);
+
+        // Emit `beforeExit` if the loop became alive either after emitting
+        // event, or after running some callbacks.
+        more = uv_loop_alive(env.event_loop());
+        if (uv_run(env.event_loop(), UV_RUN_NOWAIT) != 0)
+          more = true;
+      }
+
+#if ENABLE_TTD_NODE
+      JsTTDNotifyYield();
+#endif
+    } while (more == true);
+  }
+
+  env.set_trace_sync_io(false);
+
+  const int exit_code = EmitExit(&env);
+  RunAtExit(&env);
+
+  WaitForInspectorDisconnect(&env);
+#if defined(LEAK_SANITIZER)
+  __lsan_do_leak_check();
+#endif
+
+  return exit_code;
+}
+
+
+inline int Start(uv_loop_t* event_loop,
+                 int argc, const char* const* argv,
+                 int exec_argc, const char* const* exec_argv) {
   Isolate::CreateParams params;
-  ArrayBufferAllocator array_buffer_allocator;
-  params.array_buffer_allocator = &array_buffer_allocator;
+  ArrayBufferAllocator allocator;
+  params.array_buffer_allocator = &allocator;
 #ifdef NODE_ENABLE_VTUNE_PROFILING
   params.code_event_handler = vTune::GetVtuneCodeEventHandler();
 #endif
-  Isolate* isolate = Isolate::New(params);
 
-  {
-    Mutex::ScopedLock scoped_lock(node_isolate_mutex);
-    if (instance_data->is_main()) {
-      CHECK_EQ(node_isolate, nullptr);
-      node_isolate = isolate;
-    }
+#if ENABLE_TTD_NODE
+  if (s_doTTRecord) {
+      fprintf(stderr, "Recording is enabled (but not yet started)...\n");
   }
+
+  Isolate* const isolate = Isolate::NewWithTTDSupport(params,
+                                                      0, nullptr,
+                                                      s_doTTRecord,
+                                                      false, false,
+                                                      s_ttdSnapInterval,
+                                                      s_ttdSnapHistoryLength);
+#else
+  Isolate* const isolate = Isolate::New(params);
+#endif
+
+  if (isolate == nullptr)
+    return 12;  // Signal internal error.
+
+  isolate->AddMessageListener(OnMessage);
+  isolate->SetAbortOnUncaughtExceptionCallback(ShouldAbortOnUncaughtException);
+  isolate->SetAutorunMicrotasks(false);
+  isolate->SetFatalErrorHandler(OnFatalError);
 
   if (track_heap_objects) {
     isolate->GetHeapProfiler()->StartTrackingHeapObjects(true);
   }
 
+  {
+    Mutex::ScopedLock scoped_lock(node_isolate_mutex);
+    CHECK_EQ(node_isolate, nullptr);
+    node_isolate = isolate;
+  }
+
+  int exit_code;
   {
     Locker locker(isolate);
     Isolate::Scope isolate_scope(isolate);
@@ -4462,62 +4707,163 @@ static void StartNodeInstance(void* arg) {
       }
     }
 
-    {
-      Environment::AsyncCallbackScope callback_scope(&env);
-      LoadEnvironment(&env);
-    }
-
-    env.set_trace_sync_io(trace_sync_io);
-
-    // Enable debugger
-    if (instance_data->use_debug_agent())
-      EnableDebug(&env);
-
-    {
-      SealHandleScope seal(isolate);
-      bool more;
-      do {
-        v8_platform.PumpMessageLoop(isolate);
-        more = uv_run(env.event_loop(), UV_RUN_ONCE);
-
-        if (more == false) {
-          v8_platform.PumpMessageLoop(isolate);
-          EmitBeforeExit(&env);
-
-          // Emit `beforeExit` if the loop became alive either after emitting
-          // event, or after running some callbacks.
-          more = uv_loop_alive(env.event_loop());
-          if (uv_run(env.event_loop(), UV_RUN_NOWAIT) != 0)
-            more = true;
-        }
-      } while (more == true);
-    }
-
-    env.set_trace_sync_io(false);
-
-    int exit_code = EmitExit(&env);
-    if (instance_data->is_main())
-      instance_data->set_exit_code(exit_code);
-    RunAtExit(&env);
-
-    WaitForInspectorDisconnect(&env);
-#if defined(LEAK_SANITIZER)
-    __lsan_do_leak_check();
-#endif
+    exit_code = Start(isolate, isolate_data_ptr, argc, argv,
+                      exec_argc, exec_argv);
   }
 
   {
     Mutex::ScopedLock scoped_lock(node_isolate_mutex);
-    if (node_isolate == isolate)
-      node_isolate = nullptr;
+    CHECK_EQ(node_isolate, isolate);
+    node_isolate = nullptr;
   }
 
-  CHECK_NE(isolate, nullptr);
   isolate->Dispose();
-  isolate = nullptr;
+
+  return exit_code;
 }
 
+#if ENABLE_TTD_NODE
+inline int Start_TTDReplay(Isolate* isolate, void* isolate_context,
+  int argc, const char* const* argv,
+  int exec_argc, const char* const* exec_argv) {
+  HandleScope handle_scope(isolate);
+
+  Local<Context> context = Context::New(isolate, true);
+
+  Context::Scope context_scope(context);
+
+#ifdef NODE_ENGINE_CHAKRACORE
+  ChakraShimIsolateContext* chakra_isolate_context =
+    reinterpret_cast<ChakraShimIsolateContext*>(isolate_context);
+
+  IsolateData data(isolate, chakra_isolate_context->event_loop,
+    chakra_isolate_context->zero_fill_field);
+  IsolateData* isolate_data = &data;
+#else
+  IsolateData* isolate_data = reinterpret_cast<IsolateData*>(isolate_context);
+#endif
+
+  Environment env(isolate_data, context);
+  env.Start(argc, argv, exec_argc, exec_argv, v8_is_profiling);
+
+  bool debug_enabled =
+    debug_options.debugger_enabled() || debug_options.inspector_enabled();
+
+  // Start debug agent when argv has --debug
+  if (debug_enabled)
+    StartDebug(&env, nullptr, debug_options);
+
+  {
+    Environment::AsyncCallbackScope callback_scope(&env);
+    LoadEnvironment(&env);
+  }
+
+  env.set_trace_sync_io(trace_sync_io);
+
+  // Enable debugger
+  if (debug_enabled)
+    EnableDebug(&env);
+
+  //// TTD Specific code
+  JsTTDStart();
+
+  int64_t nextEventTime = -2;
+  bool continueReplayActions = true;
+
+  while (continueReplayActions) {
+    continueReplayActions = v8::Isolate::RunSingleStepOfReverseMoveLoop(
+        isolate,
+        &s_ttdStartupMode,
+        &nextEventTime);
+
+    // don't continue replay actions if we are not in debug mode
+    continueReplayActions &= s_doTTDebug;
+  }
+
+  JsTTDStop();
+
+  // We are done just dump the process.
+  // In the future we might want to clean up more.
+  exit(0);
+}
+
+inline int Start_TTDReplay(uv_loop_t* event_loop,
+  int argc, const char* const* argv,
+  int exec_argc, const char* const* exec_argv) {
+  Isolate::CreateParams params;
+  ArrayBufferAllocator allocator;
+  params.array_buffer_allocator = &allocator;
+#ifdef NODE_ENABLE_VTUNE_PROFILING
+  params.code_event_handler = vTune::GetVtuneCodeEventHandler();
+#endif
+
+  fprintf(stderr, "Starting replay/debug using log in %s\n", s_ttoptReplayUri);
+  Isolate* const isolate = Isolate::NewWithTTDSupport(params,
+                                                      s_ttoptReplayUriLength,
+                                                      s_ttoptReplayUri,
+                                                      false, true, s_doTTDebug,
+                                                      UINT32_MAX, UINT32_MAX);
+
+  if (isolate == nullptr)
+    return 12;  // Signal internal error.
+
+  isolate->AddMessageListener(OnMessage);
+  isolate->SetAbortOnUncaughtExceptionCallback(ShouldAbortOnUncaughtException);
+  isolate->SetAutorunMicrotasks(false);
+  isolate->SetFatalErrorHandler(OnFatalError);
+
+  if (track_heap_objects) {
+    isolate->GetHeapProfiler()->StartTrackingHeapObjects(true);
+  }
+
+  {
+    Mutex::ScopedLock scoped_lock(node_isolate_mutex);
+    CHECK_EQ(node_isolate, nullptr);
+    node_isolate = isolate;
+  }
+
+  int exit_code;
+  {
+    Locker locker(isolate);
+    Isolate::Scope isolate_scope(isolate);
+    HandleScope handle_scope(isolate);
+
+    // Node-ChakraCore requires the context to be created before the
+    // IsolateData is created
+    // So for the Node-ChakraCore case, we just populate a context
+    // that we use later, to create the IsolateData after the v8 Context
+    // has been created.
+    // Node-ChakraCore-TODO: Fix this. Also, why does the isolate data
+    // need to be populated before the context is created?
+    void* isolate_data_ptr = nullptr;
+
+#ifndef NODE_ENGINE_CHAKRACORE
+    IsolateData isolate_data(isolate, event_loop, allocator.zero_fill_field());
+    isolate_data_ptr = &isolate_data;
+#else
+    ChakraShimIsolateContext chakra_isolate_ctx(event_loop,
+      allocator.zero_fill_field());
+    isolate_data_ptr = &chakra_isolate_ctx;
+#endif
+
+    exit_code = Start_TTDReplay(isolate, isolate_data_ptr, argc, argv,
+                                exec_argc, exec_argv);
+  }
+
+  {
+    Mutex::ScopedLock scoped_lock(node_isolate_mutex);
+    CHECK_EQ(node_isolate, isolate);
+    node_isolate = nullptr;
+  }
+
+  isolate->Dispose();
+
+  return exit_code;
+}
+#endif
+
 int Start(int argc, char** argv) {
+  atexit([] () { uv_tty_reset_mode(); });
   PlatformInit();
 
   CHECK_GT(argc, 0);
@@ -4532,6 +4878,11 @@ int Start(int argc, char** argv) {
   Init(&argc, const_cast<const char**>(argv), &exec_argc, &exec_argv);
 
 #if HAVE_OPENSSL
+  {
+    std::string extra_ca_certs;
+    if (SafeGetenv("NODE_EXTRA_CA_CERTS", &extra_ca_certs))
+      crypto::UseExtraCaCerts(extra_ca_certs);
+  }
 #ifdef NODE_FIPS_MODE
   // In the case of FIPS builds we should make sure
   // the random source is properly initialized first.
@@ -4540,23 +4891,81 @@ int Start(int argc, char** argv) {
   // V8 on Windows doesn't have a good source of entropy. Seed it from
   // OpenSSL's pool.
   V8::SetEntropySource(crypto::EntropySource);
-#endif
+#endif  // HAVE_OPENSSL
 
   v8_platform.Initialize(v8_thread_pool_size);
-  V8::Initialize();
 
-  int exit_code = 1;
-  {
-    NodeInstanceData instance_data(NodeInstanceType::MAIN,
-                                   uv_default_loop(),
-                                   argc,
-                                   const_cast<const char**>(argv),
-                                   exec_argc,
-                                   exec_argv,
-                                   use_debug_agent);
-    StartNodeInstance(&instance_data);
-    exit_code = instance_data.exit_code();
+#ifndef NODE_ENGINE_CHAKRACORE
+  // Enable tracing when argv has --trace-events-enabled.
+  if (trace_enabled) {
+    fprintf(stderr, "Warning: Trace event is an experimental feature "
+            "and could change at any time.\n");
+    v8_platform.StartTracingAgent();
   }
+#else
+  if (trace_enabled) {
+    fprintf(stderr, "Warning: Tracing is not supported in node-chakracore");
+    trace_enabled = false;
+  }
+#endif
+
+  V8::Initialize();
+  v8_initialized = true;
+
+#if ENABLE_TTD_NODE
+  bool chk_debug_enabled = debug_options.debugger_enabled()
+                           || debug_options.inspector_enabled();
+
+  TTDFlagWarning_Cond(!s_doTTRecord || !s_doTTReplay,
+      "Cannot enable record & replay at same time.\n");
+
+  if (s_doTTRecord || s_doTTReplay) {
+      TTDFlagWarning_Cond(eval_string == nullptr,
+          "Eval mode not supported in record/replay.\n");
+
+      TTDFlagWarning_Cond(!force_repl,
+          "Repl mode not supported in record/replay.\n");
+  }
+
+  if (s_doTTRecord) {
+      TTDFlagWarning_Cond(!chk_debug_enabled,
+          "Cannot enable debugger with record mode.\n");
+
+      TTDFlagWarning_Cond(s_ttdStartupMode == 0x1,
+          "Cannot set break flags in record mode.\n");
+  }
+
+  if (s_doTTReplay) {
+      TTDFlagWarning_Cond(!chk_debug_enabled || s_doTTDebug,
+          "Must enable --replay-debug if attaching debugger.\n");
+
+      TTDFlagWarning_Cond(!s_doTTDebug || chk_debug_enabled,
+          "Must enable debugger if running --replay-debug.\n");
+
+      TTDFlagWarning_Cond(s_ttoptReplayUri != nullptr,
+          "Must set replay source info when replaying.\n");
+  }
+#endif
+
+
+#if ENABLE_TTD_NODE
+  int exit_code;
+  if (s_doTTReplay) {
+    exit_code =
+      Start_TTDReplay(uv_default_loop(), argc, argv, exec_argc, exec_argv);
+  } else {
+    exit_code =
+      Start(uv_default_loop(), argc, argv, exec_argc, exec_argv);
+  }
+#else
+  const int exit_code =
+      Start(uv_default_loop(), argc, argv, exec_argc, exec_argv);
+#endif
+
+  if (trace_enabled) {
+    v8_platform.StopTracingAgent();
+  }
+  v8_initialized = false;
   V8::Dispose();
 
   v8_platform.Dispose();

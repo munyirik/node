@@ -6,6 +6,8 @@
 
 "use strict";
 
+const astUtils = require("../ast-utils");
+
 //------------------------------------------------------------------------------
 // Rule Definition
 //------------------------------------------------------------------------------
@@ -47,7 +49,7 @@ module.exports = {
          */
         function getPropertyText(node) {
             const prefix = node.computed ? "[" : ".";
-            const lines = sourceCode.getText(node.property).split(/\r\n|\r|\n/g);
+            const lines = sourceCode.getText(node.property).split(astUtils.LINEBREAK_MATCHER);
             const suffix = node.computed && lines.length === 1 ? "]" : "";
 
             return prefix + lines[0] + suffix;
@@ -69,11 +71,14 @@ module.exports = {
                 }
 
                 if (depth > ignoreChainWithDepth && callee.property.loc.start.line === callee.object.loc.end.line) {
-                    context.report(
-                        callee.property,
-                        callee.property.loc.start,
-                        "Expected line break before `" + getPropertyText(callee) + "`."
-                    );
+                    context.report({
+                        node: callee.property,
+                        loc: callee.property.loc.start,
+                        message: "Expected line break before `{{callee}}`.",
+                        data: {
+                            callee: getPropertyText(callee)
+                        }
+                    });
                 }
             }
         };

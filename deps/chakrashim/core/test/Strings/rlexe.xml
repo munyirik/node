@@ -124,7 +124,7 @@
   <test>
     <default>
       <files>lastindexof.js</files>
-      <baseline>lastindexof.baseline</baseline>
+      <compile-flags>-args summary -endargs</compile-flags>
     </default>
   </test>
   <test>
@@ -242,4 +242,10 @@
       <tags>exclude_win7</tags>
     </default>
   </test>
+  <test>
+    <default>
+      <files>repeatBug.js</files>
+      <tags>exclude_chk, Slow</tags>
+    </default>
+  </test> 
 </regress-exe>

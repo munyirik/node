@@ -231,6 +231,8 @@ var tests = [
       assert.throws(function() { eval('a(...x)--'); }, ReferenceError, "Spread with CallIPut throws a ReferenceError");
     }
   },
+/*
+    A fix for an unsafe optimization makes this portion of the test time out.
   {
     name: "BLUE 596934, 597412: Incorrect spread argument length handling",
     body: function () {
@@ -245,6 +247,25 @@ var tests = [
       }
       assert.throws(function () { a(...new Array(1 << 24)); }, RangeError, "Array size greater than max call arg count throws RangeError");
       assert.throws(function () { a(...new Array(3), ...new Array(1 << 32 - 2)); }, RangeError, "Total spread size greater than max call arg count throws RangeError");
+    }
+  },
+*/
+  {
+    name: "MSRC 34309: Guard against getter in prototype",
+    body: function () {
+        var x = [0x40];
+        x.length = 0x9;
+        
+        Object.defineProperty(Array.prototype, 1, {
+            get: function() {
+                x.length = 0;
+            }
+        });
+
+        var f = function(){
+            assert.areEqual(arguments.length, 2, "Changing length of x during spreading should truncate the spread.");
+        }
+        f(...x);
     }
   },
   {
@@ -390,6 +411,86 @@ var tests = [
       assert.throws(function () { eval("foo(++...[1,2,3]);"); },      SyntaxError, "Spread with unary operator throws a syntax error",          "Unexpected ... operator");
       assert.throws(function () { eval("foo(typeof ...[1,2,3]);"); }, SyntaxError, "Spread with keyword unary operator throws a syntax error",  "Unexpected ... operator");
       assert.throws(function () { eval("foo(!!...[1,2,3]);"); },      SyntaxError, "Spread with chained unary operators throws a syntax error", "Unexpected ... operator");
+    }
+  },
+  {
+    name: "call scenario - second spread is changing the first spread's length",
+    body: function () {
+        function foo() {
+            var args = [...arguments];
+            assert.areEqual([101, 102, 201], args, "2 values from the first spread and 1 value from the second spread is expected");
+        }
+        
+        var first = [101, 102];
+        
+        var obj = {};
+        Object.defineProperty(obj, '2', {get : function() {
+            assert.fail('this should not have called')
+            return 103;
+        }});
+
+        var second = [];
+        second.length = 1;
+        var getterCalled = false;
+        Object.defineProperty(second, '0', {get : function() {
+            // Changing the state of the first spread
+            first.__proto__ = obj;
+            first.length = 3;
+            getterCalled = true;
+            return 201;
+        }});
+
+        foo(...first, ...second);
+        assert.isTrue(getterCalled, "getter of the second spread is executed");
+    }
+  },
+  {
+    name: "array scenario - second spread is changing the first spread's length",
+    body: function () {
+        
+        var first = [101, 102];
+        
+        var obj = {};
+        Object.defineProperty(obj, '2', {get : function() {
+            assert.fail('this should not have called')
+            return 103;
+        }});
+
+        var second = [];
+        second.length = 1;
+        var getterCalled = false;
+        Object.defineProperty(second, '0', {get : function() {
+            // Changing the state of the first spread
+            first.__proto__ = obj;
+            first.length = 3;
+            getterCalled = true;
+            return 201;
+        }});
+
+        var result = [...first, ...second];
+        assert.areEqual([101, 102, 201], result, "2 values from the first spread and 1 value from the second spread is expected");
+        assert.isTrue(getterCalled, "getter of the second spread is executed");
+    }
+  },
+  {
+    name: "typedarray scenario - second spread is changing value of first spread which is a typedarray",
+    body: function () {
+        
+        var first = new Uint32Array([101, 102]);
+        
+        var second = [];
+        second.length = 1;
+        var getterCalled = false;
+        Object.defineProperty(second, '0', {get : function() {
+            // Changing the state of the first spread
+            first[0] = 11; // This should not affect the resultant spread.
+            getterCalled = true;
+            return 201;
+        }});
+
+        var result = [...first, ...second];
+        assert.areEqual([101, 102, 201], result, "2 values from the first spread and 1 value from the second spread is expected");
+        assert.isTrue(getterCalled, "getter of the second spread is executed");
     }
   }
 ];

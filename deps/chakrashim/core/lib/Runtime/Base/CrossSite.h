@@ -16,8 +16,8 @@ namespace Js
         static BOOL NeedMarshalVar(Var instance, ScriptContext * requestContext);
         static Var DefaultThunk(RecyclableObject* function, CallInfo callInfo, ...);
         static Var ProfileThunk(RecyclableObject* function, CallInfo callInfo, ...);
+        static Var CrossSiteProxyCallTrap(RecyclableObject* function, CallInfo callInfo, ...);
         static Var MarshalVar(ScriptContext* scriptContext, Var value, bool fRequestWrapper = false);
-        static Var MarshalEnumerator(ScriptContext* scriptContext, Var value);
         static void MarshalDynamicObjectAndPrototype(ScriptContext * scriptContext, DynamicObject * object);
         static void ForceCrossSiteThunkOnPrototypeChain(RecyclableObject* object);
 
@@ -30,6 +30,11 @@ namespace Js
             Assert(ret == obj->IsCrossSiteObject());
             return ret;
         }
+
+#if ENABLE_TTD
+        static void MarshalCrossSite_TTDInflate(DynamicObject* obj);
+#endif
+
     private:
         static Var MarshalVarInner(ScriptContext* scriptContext, __in Js::RecyclableObject* object, bool fRequestWrapper);
         static Var CommonThunk(RecyclableObject * function, JavascriptMethod entryPoint, Arguments args);

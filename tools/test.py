@@ -42,6 +42,8 @@ import threading
 import utils
 import multiprocessing
 import errno
+import copy
+import ast
 
 from os.path import join, dirname, abspath, basename, isdir, exists
 from datetime import datetime
@@ -255,11 +257,15 @@ class DotsProgressIndicator(SimpleProgressIndicator):
 
 class TapProgressIndicator(SimpleProgressIndicator):
 
-  def _printDiagnostic(self, messages):
-    for l in messages.splitlines():
-      logger.info('# ' + l)
+  def _printDiagnostic(self, traceback, severity):
+    logger.info('  severity: %s', severity)
+    logger.info('  stack: |-')
+
+    for l in traceback.splitlines():
+      logger.info('    ' + l)
 
   def Starting(self):
+    logger.info('TAP version 13')
     logger.info('1..%i' % len(self.cases))
     self._done = 0
 
@@ -268,6 +274,8 @@ class TapProgressIndicator(SimpleProgressIndicator):
 
   def HasRun(self, output):
     self._done += 1
+    self.traceback = ''
+    self.severity = 'ok'
 
     # Print test name as (for example) "parallel/test-assert".  Tests that are
     # scraped from the addons documentation are all named test.js, making it
@@ -280,19 +288,23 @@ class TapProgressIndicator(SimpleProgressIndicator):
 
     if output.UnexpectedOutput():
       status_line = 'not ok %i %s' % (self._done, command)
+      self.severity = 'fail'
+      self.traceback = output.output.stdout + output.output.stderr
+
       if FLAKY in output.test.outcomes and self.flaky_tests_mode == DONTCARE:
         status_line = status_line + ' # TODO : Fix flaky test'
+        self.severity = 'flaky'
+
       logger.info(status_line)
-      self._printDiagnostic("\n".join(output.diagnostic))
 
       if output.HasCrashed():
-        self._printDiagnostic(PrintCrashed(output.output.exit_code))
+        self.severity = 'crashed'
+        exit_code = output.output.exit_code
+        self.traceback = "oh no!\nexit code: " + PrintCrashed(exit_code)
 
       if output.HasTimedOut():
-        self._printDiagnostic('TIMEOUT')
+        self.severity = 'fail'
 
-      self._printDiagnostic(output.output.stderr)
-      self._printDiagnostic(output.output.stdout)
     else:
       skip = skip_regex.search(output.output.stdout)
       if skip:
@@ -303,7 +315,11 @@ class TapProgressIndicator(SimpleProgressIndicator):
         if FLAKY in output.test.outcomes:
           status_line = status_line + ' # TODO : Fix flaky test'
         logger.info(status_line)
-      self._printDiagnostic("\n".join(output.diagnostic))
+
+      if output.diagnostic:
+        self.severity = 'ok'
+        self.traceback = output.diagnostic
+
 
     duration = output.test.duration
 
@@ -314,7 +330,12 @@ class TapProgressIndicator(SimpleProgressIndicator):
     # duration_ms is measured in seconds and is read as such by TAP parsers.
     # It should read as "duration including ms" rather than "duration in ms"
     logger.info('  ---')
-    logger.info('  duration_ms: %d.%d' % (total_seconds, duration.microseconds / 1000))
+    logger.info('  duration_ms: %d.%d' %
+      (total_seconds, duration.microseconds / 1000))
+    if self.severity is not 'ok' or self.traceback is not '':
+      if output.HasTimedOut():
+        self.traceback = 'timeout'
+      self._printDiagnostic(self.traceback, self.severity)
     logger.info('  ...')
 
   def Done(self):
@@ -545,11 +566,11 @@ class TestOutput(object):
       return execution_failed
 
 
-def KillProcessWithID(pid):
+def KillProcessWithID(pid, signal_to_send=signal.SIGTERM):
   if utils.IsWindows():
     os.popen('taskkill /T /F /PID %d' % pid)
   else:
-    os.kill(pid, signal.SIGTERM)
+    os.kill(pid, signal_to_send)
 
 
 MAX_SLEEP_TIME = 0.1
@@ -568,6 +589,17 @@ def Win32SetErrorMode(mode):
     pass
   return prev_error_mode
 
+
+def KillTimedOutProcess(context, pid):
+  signal_to_send = signal.SIGTERM
+  if context.abort_on_timeout:
+    # Using SIGABRT here allows the OS to generate a core dump that can be
+    # looked at post-mortem, which helps for investigating failures that are
+    # difficult to reproduce.
+    signal_to_send = signal.SIGABRT
+  KillProcessWithID(pid, signal_to_send)
+
+
 def RunProcess(context, timeout, args, **rest):
   if context.verbose: print "#", " ".join(args)
   popen_args = args
@@ -585,7 +617,6 @@ def RunProcess(context, timeout, args, **rest):
   pty_out = rest.pop('pty_out')
 
   process = subprocess.Popen(
-    shell = utils.IsWindows(),
     args = popen_args,
     **rest
   )
@@ -607,7 +638,7 @@ def RunProcess(context, timeout, args, **rest):
     while True:
       if time.time() >= end_time:
         # Kill the process and wait for it to exit.
-        KillProcessWithID(process.pid)
+        KillTimedOutProcess(context, process.pid)
         exit_code = process.wait()
         timed_out = True
         break
@@ -628,7 +659,7 @@ def RunProcess(context, timeout, args, **rest):
   while exit_code is None:
     if (not end_time is None) and (time.time() >= end_time):
       # Kill the process and wait for it to exit.
-      KillProcessWithID(process.pid)
+      KillTimedOutProcess(context, process.pid)
       exit_code = process.wait()
       timed_out = True
     else:
@@ -663,15 +694,21 @@ def Execute(args, context, timeout=None, env={}, faketty=False):
   if faketty:
     import pty
     (out_master, fd_out) = pty.openpty()
-    fd_err = fd_out
+    fd_in = fd_err = fd_out
     pty_out = out_master
   else:
     (fd_out, outname) = tempfile.mkstemp()
     (fd_err, errname) = tempfile.mkstemp()
+    fd_in = 0
     pty_out = None
 
-  # Extend environment
   env_copy = os.environ.copy()
+
+  # Remove NODE_PATH
+  if "NODE_PATH" in env_copy:
+    del env_copy["NODE_PATH"]
+
+  # Extend environment
   for key, value in env.iteritems():
     env_copy[key] = value
 
@@ -679,6 +716,7 @@ def Execute(args, context, timeout=None, env={}, faketty=False):
     context,
     timeout,
     args = args,
+    stdin = fd_in,
     stdout = fd_out,
     stderr = fd_err,
     env = env_copy,
@@ -768,12 +806,14 @@ class TestRepository(TestSuite):
   def GetBuildRequirements(self, path, context):
     return self.GetConfiguration(context).GetBuildRequirements()
 
-  def AddTestsToList(self, result, current_path, path, context, arch, mode):
+  def AddTestsToList(self, result, current_path, path, context, arch, mode, jsEngine):
     for v in VARIANT_FLAGS:
       tests = self.GetConfiguration(context).ListTests(current_path, path,
-                                                       arch, mode)
+                                                       arch, mode, jsEngine)
       for t in tests: t.variant_flags = v
-      result += tests * context.repeat
+      result += tests
+      for i in range(1, context.repeat):
+        result += copy.deepcopy(tests)
 
   def GetTestStatus(self, context, sections, defs):
     self.GetConfiguration(context).GetTestStatus(sections, defs)
@@ -793,14 +833,14 @@ class LiteralTestSuite(TestSuite):
         result += test.GetBuildRequirements(rest, context)
     return result
 
-  def ListTests(self, current_path, path, context, arch, mode):
+  def ListTests(self, current_path, path, context, arch, mode, jsEngine):
     (name, rest) = CarCdr(path)
     result = [ ]
     for test in self.tests:
       test_name = test.GetName()
       if not name or name.match(test_name):
         full_path = current_path + [test_name]
-        test.AddTestsToList(result, full_path, path, context, arch, mode)
+        test.AddTestsToList(result, full_path, path, context, arch, mode, jsEngine)
     result.sort(cmp=lambda a, b: cmp(a.GetName(), b.GetName()))
     return result
 
@@ -827,7 +867,8 @@ class Context(object):
 
   def __init__(self, workspace, buildspace, verbose, vm, args, expect_fail,
                timeout, processor, suppress_dialogs,
-               store_unexpected_output, engine, repeat):
+               store_unexpected_output, repeat, abort_on_timeout,
+               v8_enable_inspector):
     self.workspace = workspace
     self.buildspace = buildspace
     self.verbose = verbose
@@ -838,8 +879,9 @@ class Context(object):
     self.processor = processor
     self.suppress_dialogs = suppress_dialogs
     self.store_unexpected_output = store_unexpected_output
-    self.engine = engine
     self.repeat = repeat
+    self.abort_on_timeout = abort_on_timeout
+    self.v8_enable_inspector = v8_enable_inspector
 
   def GetVm(self, arch, mode):
     if arch == 'none':
@@ -851,14 +893,12 @@ class Context(object):
     # http://code.google.com/p/gyp/issues/detail?id=40
     # It will put the builds into Release/node.exe or Debug/node.exe
     if utils.IsWindows():
-      out_dir = os.path.join(dirname(__file__), "..", "out")
-      if not exists(out_dir):
-        if mode == 'debug':
-          name = os.path.abspath('Debug/node.exe')
-        else:
-          name = os.path.abspath('Release/node.exe')
-      else:
-        name = os.path.abspath(name + '.exe')
+      if not exists(name + '.exe'):
+        name = name.replace('out/', '')
+      name = os.path.abspath(name + '.exe')
+
+    if not exists(name):
+      raise ValueError('Could not find executable. Should be ' + name)
 
     return name
 
@@ -868,9 +908,23 @@ class Context(object):
   def GetTimeout(self, mode):
     return self.timeout * TIMEOUT_SCALEFACTOR[ARCH_GUESS or 'ia32'][mode]
 
+
 def RunTestCases(cases_to_run, progress, tasks, flaky_tests_mode):
   progress = PROGRESS_INDICATORS[progress](cases_to_run, flaky_tests_mode)
   return progress.Run(tasks)
+
+def GetV8InspectorEnabledFlag():
+  # The following block reads config.gypi to extract the v8_enable_inspector
+  # value. This is done to check if the inspector is disabled in which case
+  # the '--inspect' flag cannot be passed to the node process as it will
+  # cause node to exit and report the test as failed. The use case
+  # is currently when Node is configured --without-ssl and the tests should
+  # still be runnable but skip any tests that require ssl (which includes the
+  # inspector related tests).
+  with open('config.gypi', 'r') as f:
+    s = f.read()
+    config_gypi = ast.literal_eval(s)
+    return config_gypi['variables']['v8_enable_inspector']
 
 
 # -------------------------------------------
@@ -1359,11 +1413,12 @@ def BuildOptions():
       default="")
   result.add_option('--temp-dir',
       help='Optional path to change directory used for tests', default=False)
-  result.add_option("-e", "--engine", help="The javascript engine used by node.js",
-      default='v8')
   result.add_option('--repeat',
       help='Number of times to repeat given tests',
       default=1, type="int")
+  result.add_option('--abort-on-timeout',
+      help='Send SIGABRT instead of SIGTERM to kill processes that time out',
+      default=False, action="store_true", dest="abort_on_timeout")
   return result
 
 
@@ -1442,6 +1497,13 @@ def SplitPath(s):
   stripped = [ c.strip() for c in s.split('/') ]
   return [ Pattern(s) for s in stripped if len(s) > 0 ]
 
+def NormalizePath(path):
+  # strip the extra path information of the specified test
+  if path.startswith('test/'):
+    path = path[5:]
+  if path.endswith('.js'):
+    path = path[:-3]
+  return path
 
 def GetSpecialCommandProcessor(value):
   if (not value) or (value.find('@') == -1):
@@ -1465,9 +1527,11 @@ BUILT_IN_TESTS = [
   'message',
   'internet',
   'addons',
+  'addons-napi',
   'gc',
   'debugger',
   'doctool',
+  'inspector',
 ]
 
 
@@ -1514,7 +1578,7 @@ def Main():
   else:
     paths = [ ]
     for arg in args:
-      path = SplitPath(arg)
+      path = SplitPath(NormalizePath(arg))
       paths.append(path)
 
   # Check for --valgrind option. If enabled, we overwrite the special
@@ -1537,8 +1601,9 @@ def Main():
                     processor,
                     options.suppress_dialogs,
                     options.store_unexpected_output,
-                    options.engine,
-                    options.repeat)
+                    options.repeat,
+                    options.abort_on_timeout,
+                    GetV8InspectorEnabledFlag())
 
   # Get status for tests
   sections = [ ]
@@ -1560,16 +1625,25 @@ def Main():
           continue
         archEngineContext = Execute([vm, "-p", "process.arch"], context)
         vmArch = archEngineContext.stdout.rstrip()
-        if archEngineContext.exit_code is not 0 or vmArch == "undefined":
+        if archEngineContext.exit_code != 0 or vmArch == "undefined":
           print "Can't determine the arch of: '%s'" % vm
           print archEngineContext.stderr.rstrip()
           continue
+        jsEngineContext = Execute([vm, "-p", "process.jsEngine"], context)
+        jsEngine = jsEngineContext.stdout.rstrip()
+        if jsEngineContext.exit_code != 0 or jsEngine == "undefined":
+          print "Can't determine the jsEngine of: '%s'" % vm
+          print jsEngineContext.stderr.rstrip()
+          continue
         env = {
+          # variable names are lowercased when reading the status files
+          # any uppercase character here will prevent the names from matching
           'mode': mode,
           'system': utils.GuessOS(),
           'arch': vmArch,
+          'jsengine': jsEngine,
         }
-        test_list = root.ListTests([], path, context, arch, mode)
+        test_list = root.ListTests([], path, context, arch, mode, jsEngine)
         unclassified_tests += test_list
         (cases, unused_rules, all_outcomes) = (
             config.ClassifyTests(test_list, env))
@@ -1600,9 +1674,9 @@ def Main():
 
   tempdir = os.environ.get('NODE_TEST_DIR') or options.temp_dir
   if tempdir:
+    os.environ['NODE_TEST_DIR'] = tempdir
     try:
       os.makedirs(tempdir)
-      os.environ['NODE_TEST_DIR'] = tempdir
     except OSError as exception:
       if exception.errno != errno.EEXIST:
         print "Could not create the temporary directory", options.temp_dir

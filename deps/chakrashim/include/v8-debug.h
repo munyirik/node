@@ -26,11 +26,21 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #pragma once
+
 #include <v8.h>
 
 namespace v8 {
 
-// NOT IMPLEMENTED
+enum DebugEvent {
+  Break = 1,
+  Exception = 2,
+  NewFunction = 3,
+  BeforeCompile = 4,
+  AfterCompile = 5,
+  CompileError = 6,
+  AsyncTaskEvent = 7,
+};
+
 class V8_EXPORT Debug {
  public:
   class ClientData {
@@ -43,28 +53,47 @@ class V8_EXPORT Debug {
     virtual Isolate* GetIsolate() const = 0;
   };
 
+  class EventDetails {
+  public:
+    /**
+    * Event type.
+    */
+    virtual DebugEvent GetEvent() const = 0;
+
+    /**
+    * Access to execution state and event data of the debug event. Don't store
+    * these cross callbacks as their content becomes invalid.
+    */
+    virtual Local<Object> GetExecutionState() const = 0;
+    virtual Local<Object> GetEventData() const = 0;
+    virtual Local<Context> GetEventContext() const = 0;
+    virtual Isolate* GetIsolate() const = 0;
+    virtual ~EventDetails() {}
+  };
+
+
   typedef void (*DebugMessageDispatchHandler)();
+  typedef void(*EventCallback)(const EventDetails& event_details);
   typedef void (*MessageHandler)(const Message& message);
 
+  static bool SetDebugEventListener(Isolate* isolate, EventCallback that,
+    Local<Value> data = Local<Value>());
   static void DebugBreak(Isolate *isolate = NULL) {}
-  static void SetDebugMessageDispatchHandler(
-    DebugMessageDispatchHandler handler, bool provide_locker = false) {}
-  static bool EnableAgent(
-    const char *name = NULL, int port = 0, bool wait_for_connection = false);
-  static void Dispose();
-  static void DisableAgent() {}
-  static bool IsAgentEnabled();
-  static void ProcessDebugMessages(Isolate* isolate) {}
-  static Local<Context> GetDebugContext(Isolate* isolate);
-  static void SetMessageHandler(Isolate* isolate, MessageHandler handler) {}
+  static void SetMessageHandler(Isolate* isolate, MessageHandler handler);
   static void SendCommand(Isolate* isolate,
                           const uint16_t* command, int length,
-                          ClientData* client_data = NULL) {
-  }
+                          ClientData* client_data = NULL);
   static MaybeLocal<Value> GetMirror(Local<Context> context,
                                      Handle<Value> obj) {
     return MaybeLocal<Value>();
   }
+  static void ProcessDebugMessages(Isolate* isolate) {}
+  static Local<Context> GetDebugContext(Isolate* isolate);
+
+  static void EnableDebug();
+  static void EnableInspector();
+
+  static void SetLiveEditEnabled(Isolate* isolate, bool enable);
 };
 
 }  // namespace v8

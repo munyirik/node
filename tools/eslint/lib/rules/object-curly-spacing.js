@@ -74,7 +74,10 @@ module.exports = {
             context.report({
                 node,
                 loc: token.loc.start,
-                message: "There should be no space after '" + token.value + "'.",
+                message: "There should be no space after '{{token}}'.",
+                data: {
+                    token: token.value
+                },
                 fix(fixer) {
                     const nextToken = context.getSourceCode().getTokenAfter(token);
 
@@ -93,7 +96,10 @@ module.exports = {
             context.report({
                 node,
                 loc: token.loc.start,
-                message: "There should be no space before '" + token.value + "'.",
+                message: "There should be no space before '{{token}}'.",
+                data: {
+                    token: token.value
+                },
                 fix(fixer) {
                     const previousToken = context.getSourceCode().getTokenBefore(token);
 
@@ -112,7 +118,10 @@ module.exports = {
             context.report({
                 node,
                 loc: token.loc.start,
-                message: "A space is required after '" + token.value + "'.",
+                message: "A space is required after '{{token}}'.",
+                data: {
+                    token: token.value
+                },
                 fix(fixer) {
                     return fixer.insertTextAfter(token, " ");
                 }
@@ -129,7 +138,10 @@ module.exports = {
             context.report({
                 node,
                 loc: token.loc.start,
-                message: "A space is required before '" + token.value + "'.",
+                message: "A space is required before '{{token}}'.",
+                data: {
+                    token: token.value
+                },
                 fix(fixer) {
                     return fixer.insertTextBefore(token, " ");
                 }
@@ -159,8 +171,8 @@ module.exports = {
 
             if (astUtils.isTokenOnSameLine(penultimate, last)) {
                 const shouldCheckPenultimate = (
-                    options.arraysInObjectsException && penultimate.value === "]" ||
-                    options.objectsInObjectsException && penultimate.value === "}"
+                    options.arraysInObjectsException && astUtils.isClosingBracketToken(penultimate) ||
+                    options.objectsInObjectsException && astUtils.isClosingBraceToken(penultimate)
                 );
                 const penultimateType = shouldCheckPenultimate && sourceCode.getNodeByRangeIndex(penultimate.start).type;
 
@@ -194,14 +206,8 @@ module.exports = {
          */
         function getClosingBraceOfObject(node) {
             const lastProperty = node.properties[node.properties.length - 1];
-            let token = sourceCode.getTokenAfter(lastProperty);
 
-            // skip ')' and trailing commas.
-            while (token.type !== "Punctuator" || token.value !== "}") {
-                token = sourceCode.getTokenAfter(token);
-            }
-
-            return token;
+            return sourceCode.getTokenAfter(lastProperty, astUtils.isClosingBraceToken);
         }
 
         /**
@@ -242,15 +248,9 @@ module.exports = {
                 firstSpecifier = node.specifiers[1];
             }
 
-            const first = sourceCode.getTokenBefore(firstSpecifier);
-            let last = sourceCode.getTokenAfter(lastSpecifier);
-
-            // to support a trailing comma.
-            if (last.value === ",") {
-                last = sourceCode.getTokenAfter(last);
-            }
-
-            const second = sourceCode.getTokenAfter(first),
+            const first = sourceCode.getTokenBefore(firstSpecifier),
+                last = sourceCode.getTokenAfter(lastSpecifier, astUtils.isNotCommaToken),
+                second = sourceCode.getTokenAfter(first),
                 penultimate = sourceCode.getTokenBefore(last);
 
             validateBraceSpacing(node, first, second, penultimate, last);
@@ -268,15 +268,9 @@ module.exports = {
 
             const firstSpecifier = node.specifiers[0],
                 lastSpecifier = node.specifiers[node.specifiers.length - 1],
-                first = sourceCode.getTokenBefore(firstSpecifier);
-            let last = sourceCode.getTokenAfter(lastSpecifier);
-
-            // to support a trailing comma.
-            if (last.value === ",") {
-                last = sourceCode.getTokenAfter(last);
-            }
-
-            const second = sourceCode.getTokenAfter(first),
+                first = sourceCode.getTokenBefore(firstSpecifier),
+                last = sourceCode.getTokenAfter(lastSpecifier, astUtils.isNotCommaToken),
+                second = sourceCode.getTokenAfter(first),
                 penultimate = sourceCode.getTokenBefore(last);
 
             validateBraceSpacing(node, first, second, penultimate, last);

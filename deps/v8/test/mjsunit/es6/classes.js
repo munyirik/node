@@ -2,8 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Flags: --harmony-sloppy --harmony-function-name --allow-natives-syntax
-// Flags: --harmony-do-expressions
+// Flags: --allow-natives-syntax --harmony-do-expressions
 
 (function TestBasics() {
   var C = class C {}
@@ -165,14 +164,15 @@
                SyntaxError);
 
   var D = class extends function() {
-    arguments.caller;
+    this.args = arguments;
   } {};
   assertThrows(function() {
     Object.getPrototypeOf(D).arguments;
   }, TypeError);
-  assertThrows(function() {
-    new D;
-  }, TypeError);
+  var e = new D();
+  assertThrows(() => e.args.callee, TypeError);
+  assertEquals(undefined, Object.getOwnPropertyDescriptor(e.args, 'caller'));
+  assertFalse('caller' in e.args);
 })();
 
 

@@ -34,7 +34,7 @@ A SHASUMS256.txt file is produced for every promoted build, nightly, and release
 
 The GPG keys should be fetchable from a known third-party keyserver. The SKS Keyservers at <https://sks-keyservers.net> are recommended. Use the [submission](https://sks-keyservers.net/i/#submit) form to submit a new GPG key. Keys should be fetchable via:
 
-```sh
+```console
 $ gpg --keyserver pool.sks-keyservers.net --recv-keys <FINGERPRINT>
 ```
 
@@ -55,7 +55,7 @@ Create a new branch named _"vx.y.z-proposal"_, or something similar. Using `git 
 
 For a list of commits that could be landed in a patch release on v5.x
 
-```sh
+```console
 $ branch-diff v5.x master --exclude-label=semver-major,semver-minor,dont-land-on-v5.x --filter-release --format=simple
 ```
 
@@ -94,13 +94,13 @@ The general rule is to bump this version when there are _breaking ABI_ changes a
 
 Collect a formatted list of commits since the last release. Use [`changelog-maker`](https://github.com/rvagg/changelog-maker) to do this.
 
-```sh
+```console
 $ changelog-maker --group
 ```
 
 Note that changelog-maker counts commits since the last tag and if the last tag in the repository was not on the current branch you may have to supply a `--start-ref` argument:
 
-```sh
+```console
 $ changelog-maker --group --start-ref v2.3.1
 ```
 
@@ -188,13 +188,13 @@ Perform some smoke-testing. We have [citgm](https://github.com/nodejs/citgm) for
 
 If there is a reason to produce a test release for the purpose of having others try out installers or specifics of builds, produce a nightly build using **[iojs+release](https://ci-release.nodejs.org/job/iojs+release/)** and wait for it to drop in <https://nodejs.org/download/nightly/>. Follow the directions and enter a proper length commit SHA, enter a date string, and select "nightly" for "disttype".
 
-This is particularly recommended if there has been recent work relating to the OS X or Windows installers as they are not tested in any way by CI.
+This is particularly recommended if there has been recent work relating to the macOS or Windows installers as they are not tested in any way by CI.
 
 ### 8. Produce Release Builds
 
 Use **[iojs+release](https://ci-release.nodejs.org/job/iojs+release/)** to produce release artifacts. Enter the commit that you want to build from and select "release" for "disttype".
 
-Artifacts from each slave are uploaded to Jenkins and are available if further testing is required. Use this opportunity particularly to test OS X and Windows installers if there are any concerns. Click through to the individual slaves for a run to find the artifacts.
+Artifacts from each slave are uploaded to Jenkins and are available if further testing is required. Use this opportunity particularly to test macOS and Windows installers if there are any concerns. Click through to the individual slaves for a run to find the artifacts.
 
 All release slaves should achieve "SUCCESS" (and be green, not red). A release with failures should not be promoted as there are likely problems to be investigated.
 
@@ -204,7 +204,7 @@ If you have an error on Windows and need to start again, be aware that you'll ge
 
 ARMv7 takes the longest to compile. Unfortunately ccache isn't as effective on release builds, I think it's because of the additional macro settings that go in to a release build that nullify previous builds. Also most of the release build machines are separate to the test build machines so they don't get any benefit from ongoing compiles between releases. You can expect 1.5 hours for the ARMv7 builder to complete and you should normally wait for this to finish. It is possible to rush a release out if you want and add additional builds later but we normally provide ARMv7 from initial promotion.
 
-You do not have to wait for the ARMv6 / Raspberry PI builds if they take longer than the others. It is only necessary to have the main Linux (x64 and x86), OS X .pkg and .tar.gz, Windows (x64 and x86) .msi and .exe, source, headers and docs (both produced currently by an OS X slave). **If you promote builds _before_ ARM builds have finished, you must repeat the promotion step for the ARM builds when they are ready**.
+You do not have to wait for the ARMv6 / Raspberry PI builds if they take longer than the others. It is only necessary to have the main Linux (x64 and x86), macOS .pkg and .tar.gz, Windows (x64 and x86) .msi and .exe, source, headers and docs (both produced currently by an macOS slave). **If you promote builds _before_ ARM builds have finished, you must repeat the promotion step for the ARM builds when they are ready**.
 
 ### 9. Test the Build
 
@@ -224,7 +224,7 @@ $ npm install -g git-secure-tag
 
 Create a tag using the following command:
 
-```sh
+```console
 $ git secure-tag <vx.y.z> <commit-sha> -sm 'YYYY-MM-DD Node.js vx.y.z (Release Type) Release'
 ```
 
@@ -232,7 +232,7 @@ The tag **must** be signed using the GPG key that's listed for you on the projec
 
 Push the tag to the repo before you promote the builds. If you haven't pushed your tag first, then build promotion won't work properly. Push the tag using the following command:
 
-```sh
+```console
 $ git push <remote> <vx.y.z>
 ```
 
@@ -294,7 +294,12 @@ Create a new blog post by running the [nodejs.org release-post.js script](https:
 * You can add a short blurb just under the main heading if you want to say something important, otherwise the text should be publication ready.
 * The links to the download files won't be complete unless you waited for the ARMv6 builds. Any downloads that are missing will have `*Coming soon*` next to them. It's your responsibility to manually update these later when you have the outstanding builds.
 * The SHASUMS256.txt.asc content is at the bottom of the post. When you update the list of tarballs you'll need to copy/paste the new contents of this file to reflect those changes.
-* Always use pull-requests on the nodejs.org repo. Be respectful of that working group, but you shouldn't have to wait for PR sign-off. Opening a PR and merging it immediately _should_ be fine.
+* Always use pull-requests on the nodejs.org repo. Be respectful of that working group, but you shouldn't have to wait for PR sign-off. Opening a PR and merging it immediately _should_ be fine. However, please follow the following commit message format:
+```
+Blog: vX.Y.Z release post
+
+Refs: <full URL to your release proposal PR>
+```
 * Changes to `master` on the nodejs.org repo will trigger a new build of nodejs.org so your changes should appear in a few minutes after pushing.
 
 ### 15. Announce

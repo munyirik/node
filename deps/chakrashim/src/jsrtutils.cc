@@ -18,9 +18,9 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 // IN THE SOFTWARE.
 
+#include <stdarg.h>
 #include "jsrtutils.h"
-#include <functional>
-#include <algorithm>
+#include <string>
 
 namespace jsrt {
 
@@ -50,12 +50,10 @@ JsErrorCode GetProperty(JsValueRef ref,
 }
 
 JsErrorCode GetProperty(JsValueRef ref,
-                        const wchar_t *propertyName,
+                        const char *propertyName,
                         JsValueRef *result) {
   JsPropertyIdRef idRef;
-  JsErrorCode error;
-
-  error = JsGetPropertyIdFromName(propertyName, &idRef);
+  JsErrorCode error = CreatePropertyId(propertyName, &idRef);
 
   if (error != JsNoError) {
     return error;
@@ -136,7 +134,7 @@ JsErrorCode CallProperty(JsValueRef ref,
   JsErrorCode error;
 
   error = JsGetProperty(ref,
-    jsrt::IsolateShim::GetCurrent()->GetCachedPropertyIdRef(cachedIdRef),
+    IsolateShim::GetCurrent()->GetCachedPropertyIdRef(cachedIdRef),
     &propertyRef);
   if (error != JsNoError) {
     return error;
@@ -165,12 +163,12 @@ JsErrorCode CallGetter(JsValueRef ref,
   return ValueToIntLikely(value, result);
 }
 
-JsErrorCode GetPropertyOfGlobal(const wchar_t *propertyName,
+JsErrorCode GetPropertyOfGlobal(const char *propertyName,
                                 JsValueRef *ref) {
-  JsErrorCode error;
   JsPropertyIdRef propertyIdRef, globalRef;
 
-  error = JsGetPropertyIdFromName(propertyName, &propertyIdRef);
+  JsErrorCode error = CreatePropertyId(propertyName, &propertyIdRef);
+
   if (error != JsNoError) {
     return error;
   }
@@ -184,12 +182,12 @@ JsErrorCode GetPropertyOfGlobal(const wchar_t *propertyName,
   return JsGetProperty(globalRef, propertyIdRef, ref);
 }
 
-JsErrorCode SetPropertyOfGlobal(const wchar_t *propertyName,
+JsErrorCode SetPropertyOfGlobal(const char *propertyName,
                                 JsValueRef ref) {
-  JsErrorCode error;
   JsPropertyIdRef propertyIdRef, globalRef;
 
-  error = JsGetPropertyIdFromName(propertyName, &propertyIdRef);
+  JsErrorCode error = CreatePropertyId(propertyName, &propertyIdRef);
+
   if (error != JsNoError) {
     return error;
   }
@@ -275,8 +273,7 @@ JsErrorCode HasOwnProperty(JsValueRef object,
                            JsValueRef prop,
                            JsValueRef *result) {
   JsValueRef hasOwnPropertyFunction =
-    ContextShim::GetCurrent()->GetGlobalPrototypeFunction(
-      ContextShim::GlobalPrototypeFunction::Object_hasOwnProperty);
+    ContextShim::GetCurrent()->GetHasOwnPropertyFunction();
 
   JsValueRef args[] = { object, prop };
   return JsCallFunction(hasOwnPropertyFunction, args, _countof(args), result);
@@ -285,9 +282,16 @@ JsErrorCode HasOwnProperty(JsValueRef object,
 JsErrorCode GetOwnPropertyDescriptor(JsValueRef ref,
                                      JsValueRef prop,
                                      JsValueRef* result) {
-  return CallFunction(
-    ContextShim::GetCurrent()->GetGetOwnPropertyDescriptorFunction(),
-    ref, prop, result);
+
+  JsPropertyIdRef idRef;
+  JsErrorCode error;
+
+  error = GetPropertyIdFromName(prop, &idRef);
+  if (error != JsNoError) {
+    return error;
+  }
+
+  return JsGetOwnPropertyDescriptor(ref, idRef, result);
 }
 
 JsErrorCode IsZero(JsValueRef value,
@@ -437,30 +441,30 @@ JsErrorCode CreateFunctionWithExternalData(
 }
 
 JsErrorCode ToString(JsValueRef ref,
-                     JsValueRef * strRef,
-                     const wchar_t** str,
-                     bool alreadyString) {
-  // just a dummy here
-  size_t size;
-  JsErrorCode error;
+                     JsValueRef* strRef, StringUtf8* stringUtf8) {
+  IfJsErrorRet(JsConvertValueToString(ref, strRef));
+  return stringUtf8->From(*strRef);
+}
 
-  // call convert only if needed
-  if (alreadyString) {
-    *strRef = ref;
-  } else {
-    error = JsConvertValueToString(ref, strRef);
-    if (error != JsNoError) {
-      return error;
-    }
-  }
+JsErrorCode CreateString(const char *string,
+                         JsValueRef *ref) {
+  JsErrorCode errorCode = JsCreateString(string, strlen(string), ref);
+  CHAKRA_VERIFY_NOERROR(errorCode);
+  return errorCode;
+}
 
-  error = JsStringToPointer(*strRef, str, &size);
-  return error;
+JsErrorCode CreatePropertyId(const char *name,
+                             JsValueRef *propertyIdRef) {
+  JsErrorCode errorCode = JsCreatePropertyId(name,
+                                             strlen(name),
+                                             propertyIdRef);
+  CHAKRA_VERIFY_NOERROR(errorCode);
+  return errorCode;
 }
 
 
 #define DEF_IS_TYPE(F) \
-JsErrorCode Call##F##(JsValueRef value, JsValueRef *resultRef) { \
+JsErrorCode Call##F(JsValueRef value, JsValueRef *resultRef) { \
   return CallFunction( \
     ContextShim::GetCurrent()->Get##F##Function(), \
     value, resultRef); \
@@ -611,11 +615,10 @@ JsErrorCode DefineProperty(JsValueRef object,
 JsErrorCode GetPropertyIdFromName(JsValueRef nameRef,
                                   JsPropertyIdRef *idRef) {
   JsErrorCode error;
-  const wchar_t *propertyName;
-  size_t propertyNameSize;
+  StringUtf8 str;
 
   // Expect the name be either a String or a Symbol.
-  error = JsStringToPointer(nameRef, &propertyName, &propertyNameSize);
+  error = str.From(nameRef);
   if (error != JsNoError) {
     if (error == JsErrorInvalidArgument) {
       error = JsGetPropertyIdFromSymbol(nameRef, idRef);
@@ -624,7 +627,7 @@ JsErrorCode GetPropertyIdFromName(JsValueRef nameRef,
       }
     }
   } else {
-    error = JsGetPropertyIdFromName(propertyName, idRef);
+    error = JsCreatePropertyId(str, str.length(), idRef);
   }
 
   return error;
@@ -727,18 +730,28 @@ JsErrorCode HasIndexedProperty(JsValueRef object,
   return error;
 }
 
-JsErrorCode ParseScript(const wchar_t *script,
+JsErrorCode ParseScript(StringUtf8 *script,
                         JsSourceContext sourceContext,
-                        const wchar_t *sourceUrl,
+                        JsValueRef sourceUrl,
                         bool isStrictMode,
                         JsValueRef *result) {
   if (isStrictMode) {
     // do not append new line so the line numbers on error stack are correct
-    std::wstring useStrictTag(L"'use strict'; ");
-    return JsParseScript(useStrictTag.append(script).c_str(), sourceContext,
-                  sourceUrl, result);
+    std::string useStrictTag("'use strict'; ");
+    useStrictTag.append(*script);
+    JsValueRef scriptToParse;
+    CHAKRA_VERIFY(JsCreateString(useStrictTag.c_str(),
+                                 useStrictTag.length(),
+                                 &scriptToParse) == JsNoError);
+    return JsParse(scriptToParse, sourceContext, sourceUrl,
+                   JsParseScriptAttributeNone, result);
   } else {
-    return JsParseScript(script, sourceContext, sourceUrl, result);
+    JsValueRef scriptToParse;
+    CHAKRA_VERIFY(JsCreateString(script->operator*(),
+                                 script->length(),
+                                 &scriptToParse) == JsNoError);
+    return JsParse(scriptToParse, sourceContext, sourceUrl,
+                   JsParseScriptAttributeNone, result);
   }
 }
 
@@ -781,7 +794,7 @@ bool HasPrivate(JsValueRef object, JsValueRef key) {
   }
 
   JsValueRef hasPropertyRef;
-  errorCode = jsrt::HasOwnProperty(hiddenValuesTable, key, &hasPropertyRef);
+  errorCode = HasOwnProperty(hiddenValuesTable, key, &hasPropertyRef);
   RETURN_IF_JSERROR(errorCode, false);
 
   bool hasKey;
@@ -806,7 +819,7 @@ bool DeletePrivate(JsValueRef object, JsValueRef key) {
   }
 
   JsValueRef deleteResultRef;
-  errorCode = jsrt::DeleteProperty(hiddenValuesTable, key, &deleteResultRef);
+  errorCode = DeleteProperty(hiddenValuesTable, key, &deleteResultRef);
   RETURN_IF_JSERROR(errorCode, false);
 
   bool hasDeleted;
@@ -884,7 +897,7 @@ JsErrorCode SetPrivate(JsValueRef object, JsValueRef key,
     RETURN_IF_JSERROR(errorCode, errorCode);
   }
 
-  errorCode = jsrt::SetProperty(hiddenValuesTable, key, value);
+  errorCode = SetProperty(hiddenValuesTable, key, value);
   RETURN_IF_JSERROR(errorCode, errorCode);
 
   return JsNoError;
@@ -902,8 +915,7 @@ void Fatal(const char * format, ...) {
   JsValueRef exceptionRef;
   JsValueRef stackRef;
   JsValueRef strErrorRef;
-  size_t stringLength;
-  const wchar_t* strError;
+  StringUtf8 strError;
 
   va_list args;
   va_start(args, format);
@@ -920,11 +932,10 @@ void Fatal(const char * format, ...) {
       fprintf(stderr, "\nImportant: This didn't happen because of an "
         "uncaught Javascript exception.\n");
   } else if (JsGetAndClearException(&exceptionRef) == JsNoError &&
-           GetProperty(exceptionRef, L"stack", &stackRef) == JsNoError &&
+           GetProperty(exceptionRef, "stack", &stackRef) == JsNoError &&
            JsConvertValueToString(stackRef, &strErrorRef) == JsNoError  &&
-           JsStringToPointer(strErrorRef, &strError,
-                             &stringLength) == JsNoError) {
-    fwprintf(stderr, L"\n%s\n", strError);
+           strError.From(strErrorRef) == JsNoError) {
+    fprintf(stderr, "\n%s\n", (const char*)strError);
   }
 
 #ifdef DEBUG
@@ -935,18 +946,19 @@ void Fatal(const char * format, ...) {
 }
 
 
-JsValueRef CALLBACK CollectGarbage(
+JsValueRef CHAKRA_CALLBACK CollectGarbage(
   JsValueRef callee,
   bool isConstructCall,
   JsValueRef *arguments,
   unsigned short argumentCount,
   void *callbackState) {
   JsCollectGarbage(IsolateShim::GetCurrent()->GetRuntimeHandle());
-  return jsrt::GetUndefined();
+  return GetUndefined();
 }
 
 void IdleGC(uv_timer_t *timerHandler) {
 #ifndef NODE_ENGINE_CHAKRA
+#ifdef _WIN32
   unsigned int nextIdleTicks;
   CHAKRA_VERIFY(JsIdle(&nextIdleTicks) == JsNoError);
   DWORD currentTicks = GetTickCount();
@@ -967,6 +979,11 @@ void IdleGC(uv_timer_t *timerHandler) {
   } else {
     IsolateShim::GetCurrent()->ResetIsIdleGcScheduled();
   }
+#else
+  // CHAKRA-TODO: implement. No GetTickCount()
+  IsolateShim::GetCurrent()->ResetScriptExecuted();
+  IsolateShim::GetCurrent()->ResetIsIdleGcScheduled();
+#endif
 #endif
 }
 
@@ -993,5 +1010,33 @@ void ScheduleIdleGcTask(uint64_t timeoutInMilliSeconds) {
   IsolateShim::GetCurrent()->SetIsIdleGcScheduled();
 #endif
 }
-}  // namespace jsrt
 
+StringUtf8::StringUtf8() : _str(nullptr), _length(0) {
+}
+
+StringUtf8::~StringUtf8() {
+  if (_str != nullptr) {
+    free(_str);
+    _str = nullptr;
+    _length = 0;
+  }
+}
+
+JsErrorCode StringUtf8::From(JsValueRef strRef) {
+  CHAKRA_ASSERT(!_str);
+  size_t len = 0;
+  IfJsErrorRet(JsCopyString(strRef, nullptr, 0, &len));
+  char* buffer = reinterpret_cast<char*>(malloc(len+1));
+  CHAKRA_VERIFY(buffer != nullptr);
+  size_t written = 0;
+  JsErrorCode errorCode = JsCopyString(strRef, buffer, len, &written);
+  if (errorCode == JsNoError) {
+    CHAKRA_ASSERT(len == written);
+    buffer[len] = '\0';
+    _str = buffer;
+    _length = static_cast<int>(len);
+  }
+  return errorCode;
+}
+
+}  // namespace jsrt

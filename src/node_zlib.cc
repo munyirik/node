@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "node.h"
 #include "node_buffer.h"
 
@@ -181,10 +202,19 @@ class ZCtx : public AsyncWrap {
       // sync version
       ctx->env()->PrintSyncTrace();
       Process(work_req);
+
+      TTD_NATIVE_BUFFER_ACCESS_NOTIFY("ZLib sync");
+
       if (CheckError(ctx))
         AfterSync(ctx, args);
       return;
     }
+
+#if ENABLE_TTD_NODE
+    if (s_doTTRecord || s_doTTReplay) {
+      Buffer::TTDAsyncModRegister(out_buf, out);
+    }
+#endif
 
     // async version
     uv_queue_work(ctx->env()->event_loop(),
@@ -282,8 +312,11 @@ class ZCtx : public AsyncWrap {
       case INFLATERAW:
         ctx->err_ = inflate(&ctx->strm_, ctx->flush_);
 
-        // If data was encoded with dictionary
-        if (ctx->err_ == Z_NEED_DICT && ctx->dictionary_ != nullptr) {
+        // If data was encoded with dictionary (INFLATERAW will have it set in
+        // SetDictionary, don't repeat that here)
+        if (ctx->mode_ != INFLATERAW &&
+            ctx->err_ == Z_NEED_DICT &&
+            ctx->dictionary_ != nullptr) {
           // Load it
           ctx->err_ = inflateSetDictionary(&ctx->strm_,
                                            ctx->dictionary_,
@@ -372,6 +405,11 @@ class ZCtx : public AsyncWrap {
 
     ctx->write_in_progress_ = false;
 
+#if ENABLE_TTD_NODE
+    if (s_doTTRecord || s_doTTReplay) {
+      Buffer::TTDAsyncModNotify(ctx->strm_.next_out);
+    }
+#endif
     // call the write() cb
     Local<Value> args[2] = { avail_in, avail_out };
     ctx->MakeCallback(env->callback_string(), arraysize(args), args);
@@ -390,6 +428,11 @@ class ZCtx : public AsyncWrap {
     if (ctx->strm_.msg != nullptr) {
       message = ctx->strm_.msg;
     }
+#if ENABLE_TTD_NODE
+    if (s_doTTRecord || s_doTTReplay) {
+      Buffer::TTDAsyncModNotify(ctx->strm_.next_out);
+    }
+#endif
 
     HandleScope scope(env->isolate());
     Local<Value> args[2] = {
@@ -549,6 +592,13 @@ class ZCtx : public AsyncWrap {
       case DEFLATE:
       case DEFLATERAW:
         ctx->err_ = deflateSetDictionary(&ctx->strm_,
+                                         ctx->dictionary_,
+                                         ctx->dictionary_len_);
+        break;
+      case INFLATERAW:
+        // The other inflate cases will have the dictionary set when inflate()
+        // returns Z_NEED_DICT in Process()
+        ctx->err_ = inflateSetDictionary(&ctx->strm_,
                                          ctx->dictionary_,
                                          ctx->dictionary_len_);
         break;

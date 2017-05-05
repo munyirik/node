@@ -1,8 +1,30 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 'use strict';
 
 const common = require('../common');
 const assert = require('assert');
 const spawn = require('child_process').spawn;
+const os = require('os');
 const path = require('path');
 if (common.isChakraEngine) {
   console.log('1..0 # Skipped: This test is disabled for chakra engine ' +
@@ -10,21 +32,31 @@ if (common.isChakraEngine) {
   return;
 }
 
-
-
 const port = common.PORT;
 const serverPath = path.join(common.fixturesDir, 'clustered-server', 'app.js');
-const args = [`--debug-port=${port}`, serverPath];
+// cannot use 'Flags: --no-deprecation' since it doesn't effect child
+const args = [`--debug-port=${port}`, '--no-deprecation', serverPath];
 const options = { stdio: ['inherit', 'inherit', 'pipe', 'ipc'] };
 const child = spawn(process.execPath, args, options);
 
-const outputLines = [];
-var waitingForDebuggers = false;
+let expectedContent = [
+  'Starting debugger agent.',
+  'Debugger listening on 127.0.0.1:' + (port + 0),
+  'Starting debugger agent.',
+  'Debugger listening on 127.0.0.1:' + (port + 1),
+  'Starting debugger agent.',
+  'Debugger listening on 127.0.0.1:' + (port + 2),
+].join(os.EOL);
+expectedContent += os.EOL; // the last line also contains an EOL character
 
-var pids;
+let debuggerAgentsOutput = '';
+let debuggerAgentsStarted = false;
+
+let pids;
 
 child.stderr.on('data', function(data) {
-  const lines = data.toString().replace(/\r/g, '').trim().split('\n');
+  const childStderrOutputString = data.toString();
+  const lines = childStderrOutputString.replace(/\r/g, '').trim().split('\n');
 
   lines.forEach(function(line) {
     console.log('> ' + line);
@@ -37,30 +69,28 @@ child.stderr.on('data', function(data) {
         pids = msg.pids;
         console.error('got pids %j', pids);
 
-        waitingForDebuggers = true;
         process._debugProcess(child.pid);
+        debuggerAgentsStarted = true;
       });
 
       child.send({
         type: 'getpids'
       });
-    } else if (waitingForDebuggers) {
-      outputLines.push(line);
     }
-
   });
-  if (outputLines.length === expectedLines.length)
-    onNoMoreLines();
+
+  if (debuggerAgentsStarted) {
+    debuggerAgentsOutput += childStderrOutputString;
+    if (debuggerAgentsOutput.length === expectedContent.length) {
+      onNoMoreDebuggerAgentsOutput();
+    }
+  }
 });
 
-function onNoMoreLines() {
-  assertOutputLines();
+function onNoMoreDebuggerAgentsOutput() {
+  assertDebuggerAgentsOutput();
   process.exit();
 }
-
-setTimeout(function testTimedOut() {
-  common.fail('test timed out');
-}, common.platformTimeout(4000)).unref();
 
 process.on('exit', function onExit() {
   // Kill processes in reverse order to avoid timing problems on Windows where
@@ -70,21 +100,19 @@ process.on('exit', function onExit() {
   });
 });
 
-const expectedLines = [
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 0),
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 1),
-  'Starting debugger agent.',
-  'Debugger listening on 127.0.0.1:' + (port + 2),
-];
+function assertDebuggerAgentsOutput() {
+  // Workers can take different amout of time to start up, and child processes'
+  // output may be interleaved arbitrarily. Moreover, child processes' output
+  // may be written using an arbitrary number of system calls, and no assumption
+  // on buffering or atomicity of output should be made. Thus, we process the
+  // output of all child processes' debugger agents character by character, and
+  // remove each character from the set of expected characters. Once all the
+  // output from all debugger agents has been processed, we consider that we got
+  // the content we expected if there's no character left in the initial
+  // expected content.
+  debuggerAgentsOutput.split('').forEach(function gotChar(char) {
+    expectedContent = expectedContent.replace(char, '');
+  });
 
-function assertOutputLines() {
-  // Do not assume any particular order of output messages,
-  // since workers can take different amout of time to
-  // start up
-  outputLines.sort();
-  expectedLines.sort();
-
-  assert.deepStrictEqual(outputLines, expectedLines);
+  assert.strictEqual(expectedContent, '');
 }

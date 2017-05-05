@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #ifndef SRC_NODE_BUFFER_H_
 #define SRC_NODE_BUFFER_H_
 
@@ -19,6 +40,24 @@ NODE_EXTERN bool HasInstance(v8::Local<v8::Value> val);
 NODE_EXTERN bool HasInstance(v8::Local<v8::Object> val);
 NODE_EXTERN char* Data(v8::Local<v8::Value> val);
 NODE_EXTERN char* Data(v8::Local<v8::Object> val);
+
+#if ENABLE_TTD_NODE
+NODE_EXTERN void TTDAsyncModRegister(v8::Local<v8::Object> val,
+                                     unsigned char* initialModPosition);
+NODE_EXTERN void TTDAsyncModNotify(unsigned char* finalModPosition);
+NODE_EXTERN void TTDSyncDataModNotify(v8::Local<v8::Object> val,
+    unsigned int index, unsigned int count);
+// Notify us that a native buffer access (which we don't currently
+// understand/support) happened.
+#define TTD_NATIVE_BUFFER_ACCESS_NOTIFY(X) \
+    if (s_doTTRecord || s_doTTReplay) { \
+      JsTTDCheckAndAssertIfTTDRunning( \
+            "Unsupported raw buffer access -- investigate this!!!\n"); \
+    }
+#else
+#define TTD_NATIVE_BUFFER_ACCESS_NOTIFY(X)
+#endif
+
 NODE_EXTERN size_t Length(v8::Local<v8::Value> val);
 NODE_EXTERN size_t Length(v8::Local<v8::Object> val);
 

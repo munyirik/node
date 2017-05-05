@@ -22,7 +22,7 @@ module.exports = {
         fixable: "whitespace",
 
         schema: [
-            {enum: ["always", "never"]}
+            { enum: ["always", "never"] }
         ]
     },
 
@@ -74,8 +74,8 @@ module.exports = {
             // Gets braces and the first/last token of content.
             const openBrace = getOpenBrace(node);
             const closeBrace = sourceCode.getLastToken(node);
-            const firstToken = sourceCode.getTokenOrCommentAfter(openBrace);
-            const lastToken = sourceCode.getTokenOrCommentBefore(closeBrace);
+            const firstToken = sourceCode.getTokenAfter(openBrace, { includeComments: true });
+            const lastToken = sourceCode.getTokenBefore(closeBrace, { includeComments: true });
 
             // Skip if the node is invalid or empty.
             if (openBrace.type !== "Punctuator" ||
@@ -97,7 +97,10 @@ module.exports = {
                 context.report({
                     node,
                     loc: openBrace.loc.start,
-                    message: message + " after '{'.",
+                    message: "{{message}} after '{'.",
+                    data: {
+                        message
+                    },
                     fix(fixer) {
                         if (always) {
                             return fixer.insertTextBefore(firstToken, " ");
@@ -111,7 +114,10 @@ module.exports = {
                 context.report({
                     node,
                     loc: closeBrace.loc.start,
-                    message: message + " before '}'.",
+                    message: "{{message}} before '}'.",
+                    data: {
+                        message
+                    },
                     fix(fixer) {
                         if (always) {
                             return fixer.insertTextAfter(lastToken, " ");

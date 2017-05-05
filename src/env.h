@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #ifndef SRC_ENV_H_
 #define SRC_ENV_H_
 
@@ -16,6 +37,7 @@
 #include "v8.h"
 
 #include <stdint.h>
+#include <vector>
 
 // Caveat emptor: we're going slightly crazy with macros here but the end
 // hopefully justifies the means. We have a lot of per-context properties
@@ -33,14 +55,6 @@ namespace node {
 // worst case we pay a one-time penalty for resizing the array.
 #ifndef NODE_CONTEXT_EMBEDDER_DATA_INDEX
 #define NODE_CONTEXT_EMBEDDER_DATA_INDEX 32
-#endif
-
-// The slot 0 and 1 had already been taken by "gin" and "blink" in Chrome,
-// and the size of isolate's slots is 4 by default, so using 3 should
-// hopefully make node work independently when embedded into other
-// application.
-#ifndef NODE_ISOLATE_SLOT
-#define NODE_ISOLATE_SLOT 3
 #endif
 
 // The number of items passed to push_values_to_array_function has diminishing
@@ -81,6 +95,7 @@ namespace node {
   V(oncertcb_string, "oncertcb")                                              \
   V(onclose_string, "_onclose")                                               \
   V(code_string, "code")                                                      \
+  V(configurable_string, "configurable")                                      \
   V(cwd_string, "cwd")                                                        \
   V(dest_string, "dest")                                                      \
   V(detached_string, "detached")                                              \
@@ -88,12 +103,12 @@ namespace node {
   V(domain_string, "domain")                                                  \
   V(emitting_top_level_domain_error_string, "_emittingTopLevelDomainError")   \
   V(exchange_string, "exchange")                                              \
+  V(enumerable_string, "enumerable")                                          \
   V(idle_string, "idle")                                                      \
   V(irq_string, "irq")                                                        \
   V(encoding_string, "encoding")                                              \
   V(enter_string, "enter")                                                    \
   V(env_pairs_string, "envPairs")                                             \
-  V(env_string, "env")                                                        \
   V(errno_string, "errno")                                                    \
   V(error_string, "error")                                                    \
   V(events_string, "_events")                                                 \
@@ -111,10 +126,11 @@ namespace node {
   V(file_string, "file")                                                      \
   V(fingerprint_string, "fingerprint")                                        \
   V(flags_string, "flags")                                                    \
+  V(get_string, "get")                                                        \
+  V(get_data_clone_error_string, "_getDataCloneError")                        \
+  V(get_shared_array_buffer_id_string, "_getSharedArrayBufferId")             \
   V(gid_string, "gid")                                                        \
   V(handle_string, "handle")                                                  \
-  V(heap_total_string, "heapTotal")                                           \
-  V(heap_used_string, "heapUsed")                                             \
   V(homedir_string, "homedir")                                                \
   V(hostmaster_string, "hostmaster")                                          \
   V(ignore_string, "ignore")                                                  \
@@ -175,6 +191,7 @@ namespace node {
   V(priority_string, "priority")                                              \
   V(produce_cached_data_string, "produceCachedData")                          \
   V(raw_string, "raw")                                                        \
+  V(read_host_object_string, "_readHostObject")                               \
   V(readable_string, "readable")                                              \
   V(received_shutdown_string, "receivedShutdown")                             \
   V(refresh_string, "refresh")                                                \
@@ -182,7 +199,6 @@ namespace node {
   V(rename_string, "rename")                                                  \
   V(replacement_string, "replacement")                                        \
   V(retry_string, "retry")                                                    \
-  V(rss_string, "rss")                                                        \
   V(serial_string, "serial")                                                  \
   V(scopeid_string, "scopeid")                                                \
   V(sent_shutdown_string, "sentShutdown")                                     \
@@ -190,6 +206,7 @@ namespace node {
   V(service_string, "service")                                                \
   V(servername_string, "servername")                                          \
   V(session_id_string, "sessionId")                                           \
+  V(set_string, "set")                                                        \
   V(shell_string, "shell")                                                    \
   V(signal_string, "signal")                                                  \
   V(size_string, "size")                                                      \
@@ -216,12 +233,14 @@ namespace node {
   V(username_string, "username")                                              \
   V(valid_from_string, "valid_from")                                          \
   V(valid_to_string, "valid_to")                                              \
+  V(value_string, "value")                                                    \
   V(verify_error_string, "verifyError")                                       \
   V(version_string, "version")                                                \
   V(weight_string, "weight")                                                  \
   V(windows_verbatim_arguments_string, "windowsVerbatimArguments")            \
   V(wrap_string, "wrap")                                                      \
   V(writable_string, "writable")                                              \
+  V(write_host_object_string, "_writeHostObject")                             \
   V(write_queue_size_string, "writeQueueSize")                                \
   V(x_forwarded_string, "x-forwarded-for")                                    \
   V(zero_return_string, "ZERO_RETURN")                                        \
@@ -238,7 +257,6 @@ namespace node {
   V(context, v8::Context)                                                     \
   V(domain_array, v8::Array)                                                  \
   V(domains_stack_array, v8::Array)                                           \
-  V(fs_stats_constructor_function, v8::Function)                              \
   V(generic_internal_field_template, v8::ObjectTemplate)                      \
   V(jsstream_constructor_template, v8::FunctionTemplate)                      \
   V(module_load_list_array, v8::Array)                                        \
@@ -255,6 +273,7 @@ namespace node {
   V(tls_wrap_constructor_template, v8::FunctionTemplate)                      \
   V(tty_constructor_template, v8::FunctionTemplate)                           \
   V(udp_constructor_function, v8::Function)                                   \
+  V(url_constructor_function, v8::Function)                                   \
   V(write_wrap_constructor_function, v8::Function)                            \
 
 class Environment;
@@ -275,9 +294,9 @@ class IsolateData {
   inline uv_loop_t* event_loop() const;
   inline uint32_t* zero_fill_field() const;
 
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline v8::Local<TypeName> PropertyName(v8::Isolate* isolate) const;
   PER_ISOLATE_PRIVATE_SYMBOL_PROPERTIES(VP)
   PER_ISOLATE_STRING_PROPERTIES(VS)
@@ -286,9 +305,9 @@ class IsolateData {
 #undef VP
 
  private:
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   v8::Eternal<TypeName> PropertyName ## _;
   PER_ISOLATE_PRIVATE_SYMBOL_PROPERTIES(VP)
   PER_ISOLATE_STRING_PROPERTIES(VS)
@@ -431,8 +450,10 @@ class Environment {
   inline uint32_t watched_providers() const;
 
   static inline Environment* from_immediate_check_handle(uv_check_t* handle);
+  static inline Environment* from_destroy_ids_idle_handle(uv_idle_t* handle);
   inline uv_check_t* immediate_check_handle();
   inline uv_idle_t* immediate_idle_handle();
+  inline uv_idle_t* destroy_ids_idle_handle();
 
   // Register clean-up cb to be called on environment destruction.
   inline void RegisterHandleCleanup(uv_handle_t* handle,
@@ -463,14 +484,20 @@ class Environment {
 
   inline int64_t get_async_wrap_uid();
 
-  inline uint32_t* heap_statistics_buffer() const;
-  inline void set_heap_statistics_buffer(uint32_t* pointer);
+  // List of id's that have been destroyed and need the destroy() cb called.
+  inline std::vector<int64_t>* destroy_ids_list();
 
-  inline uint32_t* heap_space_statistics_buffer() const;
-  inline void set_heap_space_statistics_buffer(uint32_t* pointer);
+  inline double* heap_statistics_buffer() const;
+  inline void set_heap_statistics_buffer(double* pointer);
+
+  inline double* heap_space_statistics_buffer() const;
+  inline void set_heap_space_statistics_buffer(double* pointer);
 
   inline char* http_parser_buffer() const;
   inline void set_http_parser_buffer(char* buffer);
+
+  inline v8::Local<v8::Float64Array> fs_stats_field_array() const;
+  inline void set_fs_stats_field_array(v8::Local<v8::Float64Array> fields);
 
   inline void ThrowError(const char* errmsg);
   inline void ThrowTypeError(const char* errmsg);
@@ -484,11 +511,6 @@ class Environment {
                                const char* message = nullptr,
                                const char* path = nullptr,
                                const char* dest = nullptr);
-
-  // Convenience methods for contextify
-  inline static void ThrowError(v8::Isolate* isolate, const char* errmsg);
-  inline static void ThrowTypeError(v8::Isolate* isolate, const char* errmsg);
-  inline static void ThrowRangeError(v8::Isolate* isolate, const char* errmsg);
 
   inline v8::Local<v8::FunctionTemplate>
       NewFunctionTemplate(v8::FunctionCallback callback,
@@ -510,9 +532,9 @@ class Environment {
 
   // Strings and private symbols are shared across shared contexts
   // The getters simply proxy to the per-isolate primitive.
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline v8::Local<TypeName> PropertyName() const;
   PER_ISOLATE_PRIVATE_SYMBOL_PROPERTIES(VP)
   PER_ISOLATE_STRING_PROPERTIES(VS)
@@ -546,10 +568,14 @@ class Environment {
   static const int kContextEmbedderDataIndex = NODE_CONTEXT_EMBEDDER_DATA_INDEX;
 
  private:
+  inline void ThrowError(v8::Local<v8::Value> (*fun)(v8::Local<v8::String>),
+                         const char* errmsg);
+
   v8::Isolate* const isolate_;
   IsolateData* const isolate_data_;
   uv_check_t immediate_check_handle_;
   uv_idle_t immediate_idle_handle_;
+  uv_idle_t destroy_ids_idle_handle_;
   uv_prepare_t idle_prepare_handle_;
   uv_check_t idle_check_handle_;
   AsyncHooks async_hooks_;
@@ -564,6 +590,7 @@ class Environment {
   bool trace_sync_io_;
   size_t makecallback_cntr_;
   int64_t async_wrap_uid_;
+  std::vector<int64_t> destroy_ids_list_;
   debugger::Agent debugger_agent_;
 #if HAVE_INSPECTOR
   inspector::Agent inspector_agent_;
@@ -575,10 +602,13 @@ class Environment {
            &HandleCleanup::handle_cleanup_queue_> handle_cleanup_queue_;
   int handle_cleanup_waiting_;
 
-  uint32_t* heap_statistics_buffer_ = nullptr;
-  uint32_t* heap_space_statistics_buffer_ = nullptr;
+  double* heap_statistics_buffer_ = nullptr;
+  double* heap_space_statistics_buffer_ = nullptr;
 
   char* http_parser_buffer_;
+
+  // We depend on the property in fs.js to manage the lifetime appropriately
+  v8::Global<v8::Float64Array> fs_stats_field_array_;
 
 #define V(PropertyName, TypeName)                                             \
   v8::Persistent<TypeName> PropertyName ## _;

@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "node.h"
 #include "node_file.h"
 #include "node_buffer.h"
@@ -27,8 +48,9 @@
 namespace node {
 
 using v8::Array;
+using v8::ArrayBuffer;
 using v8::Context;
-using v8::EscapableHandleScope;
+using v8::Float64Array;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
@@ -137,7 +159,7 @@ static inline bool IsInt64(double x) {
 
 static void After(uv_fs_t *req) {
   FSReqWrap* req_wrap = static_cast<FSReqWrap*>(req->data);
-  CHECK_EQ(&req_wrap->req_, req);
+  CHECK_EQ(req_wrap->req(), req);
   req_wrap->ReleaseEarly();  // Free memory that's no longer used now.
 
   Environment* env = req_wrap->env();
@@ -193,6 +215,14 @@ static void After(uv_fs_t *req) {
         argc = 1;
         break;
 
+      case UV_FS_STAT:
+      case UV_FS_LSTAT:
+      case UV_FS_FSTAT:
+        argc = 1;
+        FillStatsArray(env->fs_stats_field_array(),
+                       static_cast<const uv_stat_t*>(req->ptr));
+        break;
+
       case UV_FS_UTIME:
       case UV_FS_FUTIME:
         argc = 0;
@@ -204,13 +234,6 @@ static void After(uv_fs_t *req) {
 
       case UV_FS_WRITE:
         argv[1] = Integer::New(env->isolate(), req->result);
-        break;
-
-      case UV_FS_STAT:
-      case UV_FS_LSTAT:
-      case UV_FS_FSTAT:
-        argv[1] = BuildStatsObject(env,
-                                   static_cast<const uv_stat_t*>(req->ptr));
         break;
 
       case UV_FS_MKDTEMP:
@@ -274,6 +297,17 @@ static void After(uv_fs_t *req) {
 
       case UV_FS_READ:
         // Buffer interface
+#if ENABLE_TTD_NODE
+        if (s_doTTRecord || s_doTTReplay) {
+#ifdef WIN32
+          byte* bufbase = reinterpret_cast<byte*>(req->fs.info.bufsml[0].base);
+#else
+          byte* bufbase = reinterpret_cast<byte*>(req->bufsml[0].base);
+#endif
+
+          Buffer::TTDAsyncModNotify(bufbase + req->result);
+        }
+#endif
         argv[1] = Integer::New(env->isolate(), req->result);
         break;
 
@@ -336,7 +370,7 @@ static void After(uv_fs_t *req) {
 
   req_wrap->MakeCallback(env->oncomplete_string(), argc, argv);
 
-  uv_fs_req_cleanup(&req_wrap->req_);
+  uv_fs_req_cleanup(req_wrap->req());
   req_wrap->Dispose();
 }
 
@@ -353,18 +387,18 @@ class fs_req_wrap {
 };
 
 
-#define ASYNC_DEST_CALL(func, req, dest, encoding, ...)                       \
+#define ASYNC_DEST_CALL(func, request, dest, encoding, ...)                   \
   Environment* env = Environment::GetCurrent(args);                           \
-  CHECK(req->IsObject());                                                     \
-  FSReqWrap* req_wrap = FSReqWrap::New(env, req.As<Object>(),                 \
+  CHECK(request->IsObject());                                                 \
+  FSReqWrap* req_wrap = FSReqWrap::New(env, request.As<Object>(),             \
                                        #func, dest, encoding);                \
   int err = uv_fs_ ## func(env->event_loop(),                                 \
-                           &req_wrap->req_,                                   \
+                           req_wrap->req(),                                   \
                            __VA_ARGS__,                                       \
                            After);                                            \
   req_wrap->Dispatched();                                                     \
   if (err < 0) {                                                              \
-    uv_fs_t* uv_req = &req_wrap->req_;                                        \
+    uv_fs_t* uv_req = req_wrap->req();                                        \
     uv_req->result = err;                                                     \
     uv_req->path = nullptr;                                                   \
     After(uv_req);                                                            \
@@ -434,104 +468,48 @@ static void Close(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-Local<Value> BuildStatsObject(Environment* env, const uv_stat_t* s) {
-  EscapableHandleScope handle_scope(env->isolate());
+void FillStatsArray(v8::Local<v8::Float64Array> fields_array,
+                    const uv_stat_t* s,
+                    int offset) {
+  Local<ArrayBuffer> ab = fields_array->Buffer();
+  double* fields = static_cast<double*>(ab->GetContents().Data()) + offset;
 
-  // If you hit this assertion, you forgot to enter the v8::Context first.
-  CHECK_EQ(env->context(), env->isolate()->GetCurrentContext());
-
-  // The code below is very nasty-looking but it prevents a segmentation fault
-  // when people run JS code like the snippet below. It's apparently more
-  // common than you would expect, several people have reported this crash...
-  //
-  //   function crash() {
-  //     fs.statSync('.');
-  //     crash();
-  //   }
-  //
-  // We need to check the return value of Integer::New() and Date::New()
-  // and make sure that we bail out when V8 returns an empty handle.
-
-  // Integers.
-#define X(name)                                                               \
-  Local<Value> name = Integer::New(env->isolate(), s->st_##name);             \
-  if (name.IsEmpty())                                                         \
-    return handle_scope.Escape(Local<Object>());                              \
-
-  X(dev)
-  X(mode)
-  X(nlink)
-  X(uid)
-  X(gid)
-  X(rdev)
-# if defined(__POSIX__)
-  X(blksize)
-# else
-  Local<Value> blksize = Undefined(env->isolate());
-# endif
-#undef X
-
-  // Numbers.
-#define X(name)                                                               \
-  Local<Value> name = Number::New(env->isolate(),                             \
-                                  static_cast<double>(s->st_##name));         \
-  if (name.IsEmpty())                                                         \
-    return handle_scope.Escape(Local<Object>());                              \
-
-  X(ino)
-  X(size)
-# if defined(__POSIX__)
-  X(blocks)
-# else
-  Local<Value> blocks = Undefined(env->isolate());
-# endif
-#undef X
-
+  fields[0] = s->st_dev;
+  fields[1] = s->st_mode;
+  fields[2] = s->st_nlink;
+  fields[3] = s->st_uid;
+  fields[4] = s->st_gid;
+  fields[5] = s->st_rdev;
+#if defined(__POSIX__)
+  fields[6] = s->st_blksize;
+#else
+  fields[6] = -1;
+#endif
+  fields[7] = s->st_ino;
+  fields[8] = s->st_size;
+#if defined(__POSIX__)
+  fields[9] = s->st_blocks;
+#else
+  fields[9] = -1;
+#endif
   // Dates.
-#define X(name)                                                               \
-  Local<Value> name##_msec =                                                  \
-    Number::New(env->isolate(),                                               \
-        (static_cast<double>(s->st_##name.tv_sec) * 1000) +                   \
-        (static_cast<double>(s->st_##name.tv_nsec / 1000000)));               \
-                                                                              \
-  if (name##_msec.IsEmpty())                                                  \
-    return handle_scope.Escape(Local<Object>());                              \
+#define X(idx, name)                                                          \
+  fields[idx] = (static_cast<double>(s->st_##name.tv_sec) * 1000) +           \
+                (static_cast<double>(s->st_##name.tv_nsec / 1000000));        \
 
-  X(atim)
-  X(mtim)
-  X(ctim)
-  X(birthtim)
+  X(10, atim)
+  X(11, mtim)
+  X(12, ctim)
+  X(13, birthtim)
 #undef X
 
-  // Pass stats as the first argument, this is the object we are modifying.
-  Local<Value> argv[] = {
-    dev,
-    mode,
-    nlink,
-    uid,
-    gid,
-    rdev,
-    blksize,
-    ino,
-    size,
-    blocks,
-    atim_msec,
-    mtim_msec,
-    ctim_msec,
-    birthtim_msec
-  };
-
-  // Call out to JavaScript to create the stats object.
-  Local<Value> stats =
-      env->fs_stats_constructor_function()->NewInstance(
-          env->context(),
-          arraysize(argv),
-          argv).FromMaybe(Local<Value>());
-
-  if (stats.IsEmpty())
-    return handle_scope.Escape(Local<Object>());
-
-  return handle_scope.Escape(stats);
+#if ENABLE_TTD_NODE
+  if (s_doTTRecord || s_doTTReplay) {
+    int modspos = offset * sizeof(double);
+    int modlength = 14 * sizeof(double);
+    ab->TTDRawBufferModifyNotifySync(modspos, modlength);
+  }
+#endif
 }
 
 // Used to speed up module loading.  Returns the contents of the file as
@@ -552,10 +530,11 @@ static void InternalModuleReadFile(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
+  const size_t kBlockSize = 32 << 10;
   std::vector<char> chars;
   int64_t offset = 0;
-  for (;;) {
-    const size_t kBlockSize = 32 << 10;
+  ssize_t numchars;
+  do {
     const size_t start = chars.size();
     chars.resize(start + kBlockSize);
 
@@ -564,26 +543,19 @@ static void InternalModuleReadFile(const FunctionCallbackInfo<Value>& args) {
     buf.len = kBlockSize;
 
     uv_fs_t read_req;
-    const ssize_t numchars =
-        uv_fs_read(loop, &read_req, fd, &buf, 1, offset, nullptr);
+    numchars = uv_fs_read(loop, &read_req, fd, &buf, 1, offset, nullptr);
     uv_fs_req_cleanup(&read_req);
 
     CHECK_GE(numchars, 0);
-    if (static_cast<size_t>(numchars) < kBlockSize) {
-      chars.resize(start + numchars);
-    }
-    if (numchars == 0) {
-      break;
-    }
     offset += numchars;
-  }
+  } while (static_cast<size_t>(numchars) == kBlockSize);
 
   uv_fs_t close_req;
   CHECK_EQ(0, uv_fs_close(loop, &close_req, fd, nullptr));
   uv_fs_req_cleanup(&close_req);
 
   size_t start = 0;
-  if (chars.size() >= 3 && 0 == memcmp(&chars[0], "\xEF\xBB\xBF", 3)) {
+  if (offset >= 3 && 0 == memcmp(&chars[0], "\xEF\xBB\xBF", 3)) {
     start = 3;  // Skip UTF-8 BOM.
   }
 
@@ -591,7 +563,7 @@ static void InternalModuleReadFile(const FunctionCallbackInfo<Value>& args) {
       String::NewFromUtf8(env->isolate(),
                           &chars[start],
                           String::kNormalString,
-                          chars.size() - start);
+                          offset - start);
   args.GetReturnValue().Set(chars_string);
 }
 
@@ -628,8 +600,8 @@ static void Stat(const FunctionCallbackInfo<Value>& args) {
     ASYNC_CALL(stat, args[1], UTF8, *path)
   } else {
     SYNC_CALL(stat, *path, *path)
-    args.GetReturnValue().Set(
-        BuildStatsObject(env, static_cast<const uv_stat_t*>(SYNC_REQ.ptr)));
+    FillStatsArray(env->fs_stats_field_array(),
+                   static_cast<const uv_stat_t*>(SYNC_REQ.ptr));
   }
 }
 
@@ -646,8 +618,8 @@ static void LStat(const FunctionCallbackInfo<Value>& args) {
     ASYNC_CALL(lstat, args[1], UTF8, *path)
   } else {
     SYNC_CALL(lstat, *path, *path)
-    args.GetReturnValue().Set(
-        BuildStatsObject(env, static_cast<const uv_stat_t*>(SYNC_REQ.ptr)));
+    FillStatsArray(env->fs_stats_field_array(),
+                   static_cast<const uv_stat_t*>(SYNC_REQ.ptr));
   }
 }
 
@@ -664,9 +636,9 @@ static void FStat(const FunctionCallbackInfo<Value>& args) {
   if (args[1]->IsObject()) {
     ASYNC_CALL(fstat, args[1], UTF8, fd)
   } else {
-    SYNC_CALL(fstat, 0, fd)
-    args.GetReturnValue().Set(
-        BuildStatsObject(env, static_cast<const uv_stat_t*>(SYNC_REQ.ptr)));
+    SYNC_CALL(fstat, nullptr, fd)
+    FillStatsArray(env->fs_stats_field_array(),
+                   static_cast<const uv_stat_t*>(SYNC_REQ.ptr));
   }
 }
 
@@ -1170,7 +1142,7 @@ static void WriteString(const FunctionCallbackInfo<Value>& args) {
   FSReqWrap* req_wrap =
       FSReqWrap::New(env, req.As<Object>(), "write", buf, UTF8, ownership);
   int err = uv_fs_write(env->event_loop(),
-                        &req_wrap->req_,
+                        req_wrap->req(),
                         fd,
                         &uvbuf,
                         1,
@@ -1178,7 +1150,7 @@ static void WriteString(const FunctionCallbackInfo<Value>& args) {
                         After);
   req_wrap->Dispatched();
   if (err < 0) {
-    uv_fs_t* uv_req = &req_wrap->req_;
+    uv_fs_t* uv_req = req_wrap->req();
     uv_req->result = err;
     uv_req->path = nullptr;
     After(uv_req);
@@ -1242,10 +1214,20 @@ static void Read(const FunctionCallbackInfo<Value>& args) {
   req = args[5];
 
   if (req->IsObject()) {
+#if ENABLE_TTD_NODE
+    if (s_doTTRecord || s_doTTReplay) {
+      Buffer::TTDAsyncModRegister(buffer_obj, reinterpret_cast<byte*>(buf));
+    }
+#endif
     ASYNC_CALL(read, req, UTF8, fd, &uvbuf, 1, pos);
   } else {
     SYNC_CALL(read, 0, fd, &uvbuf, 1, pos)
     args.GetReturnValue().Set(SYNC_RESULT);
+#if ENABLE_TTD_NODE
+    if (s_doTTRecord || s_doTTReplay) {
+      Buffer::TTDSyncDataModNotify(buffer_obj, off, SYNC_RESULT);
+    }
+#endif
   }
 }
 
@@ -1445,12 +1427,22 @@ static void Mkdtemp(const FunctionCallbackInfo<Value>& args) {
   }
 }
 
-void FSInitialize(const FunctionCallbackInfo<Value>& args) {
-  Local<Function> stats_constructor = args[0].As<Function>();
-  CHECK(stats_constructor->IsFunction());
-
+void GetStatValues(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
-  env->set_fs_stats_constructor_function(stats_constructor);
+  Local<Float64Array> fields = env->fs_stats_field_array();
+
+  if (fields.IsEmpty()) {
+    // stat fields contains twice the number of entries because `fs.StatWatcher`
+    // needs room to store data for *two* `fs.Stats` instances.
+    Local<ArrayBuffer> ab = ArrayBuffer::New(env->isolate(),
+        new double[2 * 14],
+        sizeof(double) * 2 * 14);
+    fields = Float64Array::New(ab, 0, 2 * 14);
+
+    env->set_fs_stats_field_array(fields);
+  }
+
+  args.GetReturnValue().Set(fields);
 }
 
 #ifdef UWP_DLL
@@ -1489,10 +1481,6 @@ void InitFs(Local<Object> target,
             Local<Context> context,
             void* priv) {
   Environment* env = Environment::GetCurrent(context);
-
-  // Function which creates a new Stats object.
-  target->Set(FIXED_ONE_BYTE_STRING(env->isolate(), "FSInitialize"),
-              env->NewFunctionTemplate(FSInitialize)->GetFunction());
 
   env->SetMethod(target, "access", Access);
   env->SetMethod(target, "close", Close);
@@ -1536,6 +1524,7 @@ void InitFs(Local<Object> target,
   env->SetMethod(target, "uwpinstalldir", UWPinstalldir);
   env->SetMethod(target, "uwpstoragedir", UWPstoragedir);
 #endif
+  env->SetMethod(target, "getStatValues", GetStatValues);
 
   StatWatcher::Initialize(env, target);
 

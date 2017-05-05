@@ -25,7 +25,7 @@ namespace v8 {
 
 using CachedPropertyIdRef = jsrt::CachedPropertyIdRef;
 
-__declspec(thread) JsSourceContext currentContext;
+THREAD_LOCAL JsSourceContext currentContext;
 extern bool g_useStrict;
 
 Local<Script> Script::Compile(Handle<String> source, ScriptOrigin* origin) {
@@ -64,23 +64,28 @@ static JsErrorCode CreateScriptObject(JsValueRef sourceRef,
 MaybeLocal<Script> Script::Compile(Local<Context> context,
                                    Handle<String> source,
                                    ScriptOrigin* origin) {
-  JsErrorCode error;
+  JsErrorCode error = JsNoError;
   JsValueRef filenameRef;
-  const wchar_t* filename = L"";
+  const char* filename = "";
 
   if (origin != nullptr) {
-    error = jsrt::ToString(*origin->ResourceName(), &filenameRef, &filename);
+    filenameRef = *origin->ResourceName();
   } else {
-    error = JsPointerToString(filename, 0, &filenameRef);
+    error = JsCreateString(filename,
+                           strlen(filename),
+                           &filenameRef);
   }
 
   if (error == JsNoError) {
     JsValueRef sourceRef;
-    const wchar_t *script;
+    jsrt::StringUtf8 script;
     error = jsrt::ToString(*source, &sourceRef, &script);
     if (error == JsNoError) {
       JsValueRef scriptFunction;
-      error = jsrt::ParseScript(script, currentContext++, filename, g_useStrict,
+      error = jsrt::ParseScript(&script,
+                                currentContext++,
+                                filenameRef,
+                                g_useStrict,
                                 &scriptFunction);
       if (error == JsNoError) {
         JsValueRef scriptObject;
@@ -122,7 +127,7 @@ Local<Value> Script::Run() {
   return FromMaybe(Run(Local<Context>()));
 }
 
-static void CALLBACK UnboundScriptFinalizeCallback(void * data) {
+static void CHAKRA_CALLBACK UnboundScriptFinalizeCallback(void * data) {
   JsValueRef * unboundScriptData = static_cast<JsValueRef *>(data);
   delete unboundScriptData;
 }
@@ -162,11 +167,9 @@ Local<Script> UnboundScript::BindToCurrentContext() {
   }
 
   // Create a script object in another context
-  const wchar_t * source;
-  size_t sourceLength;
-  const wchar_t * filename;
-  size_t filenameLength;
-
+  jsrt::StringUtf8 source;
+  jsrt::StringUtf8 filename;
+  JsValueRef originalFilenameRef;
   {
     jsrt::ContextShim::Scope scope(contextShim);
     JsValueRef scriptRef;
@@ -180,34 +183,34 @@ Local<Script> UnboundScript::BindToCurrentContext() {
                           &originalSourceRef) != JsNoError) {
       return Local<Script>();
     }
-    JsValueRef originalFilenameRef;
     if (jsrt::GetProperty(scriptRef, CachedPropertyIdRef::filename,
                           &originalFilenameRef) != JsNoError) {
       return Local<Script>();
     }
-    if (JsStringToPointer(originalSourceRef,
-                          &source, &sourceLength) != JsNoError) {
+    if (source.From(originalSourceRef) != JsNoError) {
       return Local<Script>();
     }
-    if (JsStringToPointer(originalFilenameRef,
-                          &filename, &filenameLength) != JsNoError) {
+    if (filename.From(originalFilenameRef) != JsNoError) {
       return Local<Script>();
     }
   }
 
   JsValueRef scriptFunction;
-  if (jsrt::ParseScript(source, currentContext++, filename,
+  if (jsrt::ParseScript(&source, currentContext++, originalFilenameRef,
                         g_useStrict, &scriptFunction) != JsNoError) {
     return Local<Script>();
   }
 
   JsValueRef sourceRef;
-  if (JsPointerToString(source, sourceLength, &sourceRef) != JsNoError) {
+
+  if (JsCreateString(*source, source.length(),
+                     &sourceRef) != JsNoError) {
     return Local<Script>();
   }
 
   JsValueRef filenameRef;
-  if (JsPointerToString(filename, filenameLength, &filenameRef) != JsNoError) {
+  if (JsCreateString(*filename, filename.length(),
+                     &filenameRef) != JsNoError) {
     return Local<Script>();
   }
 
@@ -220,6 +223,12 @@ Local<Script> UnboundScript::BindToCurrentContext() {
   }
 
   return Local<Script>::New(scriptObject);
+}
+
+int UnboundScript::GetId() {
+  // CHAKRA-TODO: Figure out what to do here
+  CHAKRA_ASSERT(false);
+  return 0;
 }
 
 MaybeLocal<UnboundScript> ScriptCompiler::CompileUnboundScript(
@@ -247,5 +256,9 @@ Local<Script> ScriptCompiler::Compile(Isolate* isolate,
                                       Source* source,
                                       CompileOptions options) {
   return FromMaybe(Compile(Local<Context>(), source, options));
+}
+
+uint32_t ScriptCompiler::CachedDataVersionTag() {
+  return 0;
 }
 }  // namespace v8

@@ -28,6 +28,25 @@ using jsrt::ContextShim;
 using jsrt::PropertyDescriptorOptionValues;
 using jsrt::DefineProperty;
 
+MaybeLocal<Function> Function::New(Local<Context> context,
+                                   FunctionCallback callback,
+                                   Local<Value> data,
+                                   int length,
+                                   ConstructorBehavior behavior) {
+  Local<FunctionTemplate> funcTemplate = FunctionTemplate::New(
+    IsolateShim::GetCurrentAsIsolate(),
+    callback,
+    data,
+    Local<Signature>(),
+    length);
+
+  if (behavior == ConstructorBehavior::kThrow) {
+    funcTemplate->RemovePrototype();
+  }
+
+  return Local<Function>(funcTemplate->GetFunction());
+}
+
 MaybeLocal<Object> Function::NewInstance(Local<Context> context,
                                          int argc, Handle<Value> argv[]) const {
   jsrt::JsArguments<> args(argc + 1);
@@ -87,7 +106,7 @@ Local<Value> Function::Call(Handle<Value> recv,
 }
 
 void Function::SetName(Handle<String> name) {
-  JsErrorCode error = DefineProperty((JsValueRef)this,
+  JsErrorCode error = jsrt::DefineProperty((JsValueRef)this,
                  IsolateShim::GetCurrent()->GetCachedPropertyIdRef(
                    jsrt::CachedPropertyIdRef::name),
                  PropertyDescriptorOptionValues::False,
@@ -97,6 +116,41 @@ void Function::SetName(Handle<String> name) {
                  JS_INVALID_REFERENCE,
                  JS_INVALID_REFERENCE);
   CHAKRA_ASSERT(error == JsNoError);
+  UNUSED(error);
+}
+
+Local<Value> Function::GetName() const {
+  // CHAKRA-TODO: Figure out what to do here
+  //
+  // kpathak: no JSrt API to do this. probably do it in chakra_shim.js?
+  CHAKRA_ASSERT(false);
+  return Local<Value>();
+}
+
+Local<Value> Function::GetInferredName() const {
+  // CHAKRA-TODO: Figure out what to do here
+  CHAKRA_ASSERT(false);
+  return Local<Value>();
+}
+
+const int Function::kLineOffsetNotFound = -1;
+
+int Function::GetScriptLineNumber() const {
+  // CHAKRA-TODO: Figure out what to do here
+  CHAKRA_ASSERT(false);
+  return 0;
+}
+
+int Function::GetScriptColumnNumber() const {
+  // CHAKRA-TODO: Figure out what to do here
+  CHAKRA_ASSERT(false);
+  return 0;
+}
+
+int Function::ScriptId() const {
+  // CHAKRA-TODO: Figure out what to do here
+  CHAKRA_ASSERT(false);
+  return 0;
 }
 
 Function *Function::Cast(Value *obj) {

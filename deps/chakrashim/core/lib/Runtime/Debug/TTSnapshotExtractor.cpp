@@ -36,7 +36,7 @@ namespace TTD
 
     void SnapshotExtractor::MarkVisitStandardProperties(Js::RecyclableObject* obj)
     {
-        AssertMsg(Js::DynamicType::Is(obj->GetTypeId()) || obj->GetPropertyCount() == 0, "Only dynamic objects should have standard properties.");
+        TTDAssert(Js::DynamicType::Is(obj->GetTypeId()) || obj->GetPropertyCount() == 0, "Only dynamic objects should have standard properties.");
 
         if(Js::DynamicType::Is(obj->GetTypeId()))
         {
@@ -110,25 +110,16 @@ namespace TTD
 
             if(slots.IsFunctionScopeSlotArray())
             {
-                Js::FunctionBody* fb = slots.GetFunctionBody();
+                Js::FunctionBody* fb = slots.GetFunctionInfo()->GetFunctionBody();
 
                 slotInfo->isFunctionBodyMetaData = true;
                 slotInfo->OptFunctionBodyId = TTD_CONVERT_FUNCTIONBODY_TO_PTR_ID(fb);
                 slotInfo->OptDebugScopeId = TTD_INVALID_PTR_ID;
                 slotInfo->OptWellKnownDbgScope = TTD_INVALID_WELLKNOWN_TOKEN;
 
-#if ENABLE_TTD_INTERNAL_DIAGNOSTICS
                 Js::PropertyId* propertyIds = fb->GetPropertyIdsForScopeSlotArray();
-                slotInfo->DebugPIDArray = this->m_pendingSnap->GetSnapshotSlabAllocator().SlabAllocateArray<Js::PropertyId>(slotInfo->SlotCount);
-
-                for(uint32 j = 0; j < slotInfo->SlotCount; ++j)
-                {
-                    slotInfo->DebugPIDArray[j] = propertyIds[j];
-                }
-
-                slotInfo->OptDiagDebugScopeBegin = -1;
-                slotInfo->OptDiagDebugScopeEnd = -1;
-#endif
+                slotInfo->PIDArray = this->m_pendingSnap->GetSnapshotSlabAllocator().SlabAllocateArray<Js::PropertyId>(slotInfo->SlotCount);
+                js_memcpy_s(slotInfo->PIDArray, sizeof(Js::PropertyId) * slotInfo->SlotCount, propertyIds, sizeof(Js::PropertyId) * slots.GetCount());
             }
             else
             {
@@ -145,20 +136,15 @@ namespace TTD
                 else
                 {
                     slotInfo->OptDebugScopeId = TTD_INVALID_PTR_ID;
-                    slotInfo->OptWellKnownDbgScope = wellKnownToken;
+                    slotInfo->OptWellKnownDbgScope = this->m_pendingSnap->GetSnapshotSlabAllocator().CopyRawNullTerminatedStringInto(wellKnownToken);
                 }
 
-#if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-                slotInfo->DebugPIDArray = this->m_pendingSnap->GetSnapshotSlabAllocator().SlabAllocateArray<Js::PropertyId>(slotInfo->SlotCount);
+                slotInfo->PIDArray = this->m_pendingSnap->GetSnapshotSlabAllocator().SlabAllocateArray<Js::PropertyId>(slotInfo->SlotCount);
 
                 for(uint32 j = 0; j < slotInfo->SlotCount; ++j)
                 {
-                    slotInfo->DebugPIDArray[j] = dbgScope->GetPropertyIdForSlotIndex_TTD(j);
+                    slotInfo->PIDArray[j] = dbgScope->GetPropertyIdForSlotIndex_TTD(j);
                 }
-
-                slotInfo->OptDiagDebugScopeBegin = dbgScope->GetStart();
-                slotInfo->OptDiagDebugScopeEnd = dbgScope->GetEnd();
-#endif
             }
 
             this->m_marks.ClearMark(scope);
@@ -169,7 +155,7 @@ namespace TTD
     {
         if(this->m_marks.IsMarked(environment))
         {
-            AssertMsg(environment->GetLength() > 0, "This doesn't make sense");
+            TTDAssert(environment->GetLength() > 0, "This doesn't make sense");
 
             NSSnapValues::ScriptFunctionScopeInfo* funcScopeInfo = this->m_pendingSnap->GetNextAvailableFunctionScopeEntry();
             funcScopeInfo->ScopeId = TTD_CONVERT_ENV_TO_PTR_ID(environment);
@@ -198,7 +184,7 @@ namespace TTD
                     break;
                 }
                 default:
-                    AssertMsg(false, "Unknown scope kind");
+                    TTDAssert(false, "Unknown scope kind");
                     entryInfo->IDValue = TTD_INVALID_PTR_ID;
                     break;
                 }
@@ -247,22 +233,22 @@ namespace TTD
 
     SnapShot* SnapshotExtractor::GetPendingSnapshot()
     {
-        AssertMsg(this->m_pendingSnap != nullptr, "Should only call if we are extracting a snapshot");
+        TTDAssert(this->m_pendingSnap != nullptr, "Should only call if we are extracting a snapshot");
 
         return this->m_pendingSnap;
     }
 
     SlabAllocator& SnapshotExtractor::GetActiveSnapshotSlabAllocator()
     {
-        AssertMsg(this->m_pendingSnap != nullptr, "Should only call if we are extracting a snapshot");
+        TTDAssert(this->m_pendingSnap != nullptr, "Should only call if we are extracting a snapshot");
 
         return this->m_pendingSnap->GetSnapshotSlabAllocator();
     }
 
     void SnapshotExtractor::MarkVisitVar(Js::Var var)
     {
-        AssertMsg(var != nullptr, "I don't think this should happen but not 100% sure.");
-        AssertMsg(Js::JavascriptOperators::GetTypeId(var) < Js::TypeIds_Limit || Js::RecyclableObject::FromVar(var)->CanHaveInterceptors(), "Not cool.");
+        TTDAssert(var != nullptr, "I don't think this should happen but not 100% sure.");
+        TTDAssert(Js::JavascriptOperators::GetTypeId(var) < Js::TypeIds_Limit || Js::RecyclableObject::FromVar(var)->CanHaveInterceptors(), "Not cool.");
 
         //We don't need to visit tagged things
         if(JsSupport::IsVarTaggedInline(var))
@@ -280,7 +266,7 @@ namespace TTD
         }
         else
         {
-            AssertMsg(JsSupport::IsVarComplexKind(var), "Shouldn't be anything else");
+            TTDAssert(JsSupport::IsVarComplexKind(var), "Shouldn't be anything else");
 
             if(this->m_marks.MarkAndTestAddr<MarkTableTag::CompoundObjectTag>(var))
             {
@@ -342,7 +328,7 @@ namespace TTD
 
                         if(slotArray.IsFunctionScopeSlotArray())
                         {
-                            this->MarkFunctionBody(slotArray.GetFunctionBody());
+                            this->MarkFunctionBody(slotArray.GetFunctionInfo()->GetFunctionBody());
                         }
 
                         for(uint j = 0; j < slotArrayCount; j++)
@@ -354,57 +340,51 @@ namespace TTD
                     break;
                 }
                 default:
-                    AssertMsg(false, "Unknown scope kind");
+                    TTDAssert(false, "Unknown scope kind");
                 }
             }
         }
     }
 
-    void SnapshotExtractor::BeginSnapshot(ThreadContext* threadContext, const JsUtil::List<Js::Var, HeapAllocator>& roots, const JsUtil::List<Js::ScriptContext*, HeapAllocator>& ctxs)
+    void SnapshotExtractor::BeginSnapshot(ThreadContext* threadContext, double gcTime)
     {
-        AssertMsg((this->m_pendingSnap == nullptr) & this->m_worklist.Empty(), "Something went wrong.");
+        TTDAssert((this->m_pendingSnap == nullptr) & this->m_worklist.Empty(), "Something went wrong.");
 
-        this->m_pendingSnap = TT_HEAP_NEW(SnapShot);
-
-        UnorderedArrayList<NSSnapValues::SnapContext, TTD_ARRAY_LIST_SIZE_XSMALL>& snpCtxs = this->m_pendingSnap->GetContextList();
-        for(int32 i = 0; i < ctxs.Count(); ++i)
-        {
-            NSSnapValues::SnapContext* snpCtx = snpCtxs.NextOpenEntry();
-            NSSnapValues::ExtractScriptContext(snpCtx, ctxs.Item(i), this->m_pendingSnap->GetSnapshotSlabAllocator());
-        }
+        this->m_pendingSnap = TT_HEAP_NEW(SnapShot, gcTime);
     }
 
-    void SnapshotExtractor::DoMarkWalk(const JsUtil::List<Js::Var, HeapAllocator>& roots, const JsUtil::List<Js::ScriptContext*, HeapAllocator>& ctxs, ThreadContext* threadContext)
+    void SnapshotExtractor::DoMarkWalk(ThreadContext* threadContext)
     {
         TTDTimer timer;
         double startTime = timer.Now();
 
-        for(int32 i = 0; i < roots.Count(); ++i)
+        //Add the global roots
+        for(auto iter = threadContext->TTDContext->GetRootTagToObjectMap().GetIterator(); iter.IsValid(); iter.MoveNext())
         {
-            Js::Var root = roots.Item(i);
+            Js::Var root = iter.CurrentValue();
             this->MarkVisitVar(root);
         }
 
         while(!this->m_worklist.Empty())
         {
             Js::RecyclableObject* nobj = this->m_worklist.Dequeue();
-            AssertMsg(JsSupport::IsVarComplexKind(nobj), "Should only be these two options");
+            TTDAssert(JsSupport::IsVarComplexKind(nobj), "Should only be these two options");
 
             this->MarkVisitStandardProperties(nobj);
             nobj->MarkVisitKindSpecificPtrs(this);
         }
 
         //Mark all of the well known objects/types
-        for(int32 i = 0; i < ctxs.Count(); ++i)
+        for(int32 i = 0; i < threadContext->TTDContext->GetTTDContexts().Count(); ++i)
         {
-            ctxs.Item(i)->TTDWellKnownInfo->MarkWellKnownObjects_TTD(this->m_marks);
+            threadContext->TTDContext->GetTTDContexts().Item(i)->TTDWellKnownInfo->MarkWellKnownObjects_TTD(this->m_marks);
         }
 
         double endTime = timer.Now();
         this->m_pendingSnap->MarkTime = (endTime - startTime) / 1000.0;
     }
 
-    void SnapshotExtractor::EvacuateMarkedIntoSnapshot(ThreadContext* threadContext, const JsUtil::List<Js::ScriptContext*, HeapAllocator>& ctxs)
+    void SnapshotExtractor::EvacuateMarkedIntoSnapshot(ThreadContext* threadContext)
     {
         TTDTimer timer;
         double startTime = timer.Now();
@@ -412,18 +392,38 @@ namespace TTD
         SnapShot* snap = this->m_pendingSnap;
         SlabAllocator& alloc = this->m_pendingSnap->GetSnapshotSlabAllocator();
 
+        //invert the root map for extracting
+        JsUtil::BaseDictionary<Js::RecyclableObject*, TTD_LOG_PTR_ID, HeapAllocator> objToLogIdMap(&HeapAllocator::Instance);
+        threadContext->TTDContext->LoadInvertedRootMap(objToLogIdMap);
+
+        UnorderedArrayList<NSSnapValues::SnapContext, TTD_ARRAY_LIST_SIZE_XSMALL>& snpCtxs = this->m_pendingSnap->GetContextList();
+        for(int32 i = 0; i < threadContext->TTDContext->GetTTDContexts().Count(); ++i)
+        {
+            NSSnapValues::SnapContext* snpCtx = snpCtxs.NextOpenEntry();
+            NSSnapValues::ExtractScriptContext(snpCtx, threadContext->TTDContext->GetTTDContexts().Item(i), objToLogIdMap, snap->GetSnapshotSlabAllocator());
+        }
+
+        //extract the thread context symbol map info
+        JsUtil::BaseDictionary<const char16*, const Js::PropertyRecord*, Recycler>* tcSymbolRegistrationMap = threadContext->GetSymbolRegistrationMap_TTD();
+        UnorderedArrayList<Js::PropertyId, TTD_ARRAY_LIST_SIZE_XSMALL>& tcSymbolMapInfo = this->m_pendingSnap->GetTCSymbolMapInfoList();
+        for(auto iter = tcSymbolRegistrationMap->GetIterator(); iter.IsValid(); iter.MoveNext())
+        {
+            Js::PropertyId* tcpid = tcSymbolMapInfo.NextOpenEntry();
+            *tcpid = iter.CurrentValue()->GetPropertyId();
+        }
+
         //We extract all the global code function bodies with the context so clear their marks now
         JsUtil::List<TopLevelFunctionInContextRelation, HeapAllocator> topLevelScriptLoad(&HeapAllocator::Instance);
         JsUtil::List<TopLevelFunctionInContextRelation, HeapAllocator> topLevelNewFunction(&HeapAllocator::Instance);
         JsUtil::List<TopLevelFunctionInContextRelation, HeapAllocator> topLevelEval(&HeapAllocator::Instance);
 
-        for(int32 i = 0; i < ctxs.Count(); ++i)
+        for(int32 i = 0; i < threadContext->TTDContext->GetTTDContexts().Count(); ++i)
         {
             topLevelScriptLoad.Clear();
             topLevelNewFunction.Clear();
             topLevelEval.Clear();
 
-            Js::ScriptContext* ctx = ctxs.Item(i);
+            Js::ScriptContext* ctx = threadContext->TTDContext->GetTTDContexts().Item(i);
             ctx->TTDContextInfo->GetLoadedSources(topLevelScriptLoad, topLevelNewFunction, topLevelEval);
 
             for(int32 j = 0; j < topLevelScriptLoad.Count(); ++j)
@@ -484,12 +484,33 @@ namespace TTD
             case MarkTableTag::SlotArrayTag:
                 break; //should be handled with the associated script function
             default:
-                AssertMsg(false, "If this isn't true then we have an unknown tag");
+                TTDAssert(false, "If this isn't true then we have an unknown tag");
                 break;
             }
 
             this->m_marks.MoveToNextAddress();
             tag = this->m_marks.GetTagValue();
+        }
+
+        //Extract the roots
+        ThreadContextTTD* txctx = threadContext->TTDContext;
+        UnorderedArrayList<NSSnapValues::SnapRootInfoEntry, TTD_ARRAY_LIST_SIZE_MID>& rootlist = this->m_pendingSnap->GetRootList();
+        for(auto iter = threadContext->TTDContext->GetRootTagToObjectMap().GetIterator(); iter.IsValid(); iter.MoveNext())
+        {
+            NSSnapValues::SnapRootInfoEntry* spe = rootlist.NextOpenEntry();
+            spe->LogObject = TTD_CONVERT_VAR_TO_PTR_ID(iter.CurrentValue());
+            spe->LogId = iter.CurrentKey();
+            spe->MaybeLongLivedRoot = txctx->ResolveIsLongLivedForExtract(spe->LogId);
+        }
+
+        if(threadContext->TTDContext->GetActiveScriptContext() == nullptr)
+        {
+            this->m_pendingSnap->SetActiveScriptContext(TTD_INVALID_LOG_PTR_ID);
+        }
+        else
+        {
+            TTD_LOG_PTR_ID ctxId = threadContext->TTDContext->GetActiveScriptContext()->ScriptContextLogTag;
+            this->m_pendingSnap->SetActiveScriptContext(ctxId);
         }
 
         double endTime = timer.Now();
@@ -519,6 +540,27 @@ namespace TTD
         this->m_lastExtractMillis = snap->ExtractTime;
 
         return snap;
+    }
+
+    void SnapshotExtractor::DoResetWeakCollectionPinSet(ThreadContext* threadContext)
+    {
+        //Add the roots
+        for(auto iter = threadContext->TTDContext->GetRootTagToObjectMap().GetIterator(); iter.IsValid(); iter.MoveNext())
+        {
+            Js::Var root = iter.CurrentValue();
+            this->MarkVisitVar(root);
+        }
+
+        while(!this->m_worklist.Empty())
+        {
+            Js::RecyclableObject* nobj = this->m_worklist.Dequeue();
+            TTDAssert(JsSupport::IsVarComplexKind(nobj), "Should only be these two options");
+
+            this->MarkVisitStandardProperties(nobj);
+            nobj->MarkVisitKindSpecificPtrs(this);
+        }
+
+        this->UnloadDataFromExtractor();
     }
 }
 

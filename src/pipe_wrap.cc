@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "pipe_wrap.h"
 
 #include "async-wrap.h"
@@ -15,7 +36,6 @@
 
 namespace node {
 
-using v8::Boolean;
 using v8::Context;
 using v8::EscapableHandleScope;
 using v8::External;
@@ -23,7 +43,6 @@ using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
 using v8::HandleScope;
-using v8::Integer;
 using v8::Local;
 using v8::Object;
 using v8::Value;
@@ -55,7 +74,11 @@ void PipeWrap::Initialize(Local<Object> target,
   env->SetProtoMethod(t, "ref", HandleWrap::Ref);
   env->SetProtoMethod(t, "hasRef", HandleWrap::HasRef);
 
+#ifdef _WIN32
   StreamWrap::AddMethods(env, t);
+#else
+  StreamWrap::AddMethods(env, t, StreamBase::kFlagHasWritev);
+#endif
 
   env->SetProtoMethod(t, "bind", Bind);
   env->SetProtoMethod(t, "listen", Listen);
@@ -141,44 +164,6 @@ void PipeWrap::Listen(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-// TODO(bnoordhuis) Maybe share this with TCPWrap?
-void PipeWrap::AfterConnect(uv_connect_t* req, int status) {
-  ConnectWrap* req_wrap = static_cast<ConnectWrap*>(req->data);
-  PipeWrap* wrap = static_cast<PipeWrap*>(req->handle->data);
-  CHECK_EQ(req_wrap->env(), wrap->env());
-  Environment* env = wrap->env();
-
-  HandleScope handle_scope(env->isolate());
-  Context::Scope context_scope(env->context());
-
-  // The wrap and request objects should still be there.
-  CHECK_EQ(req_wrap->persistent().IsEmpty(), false);
-  CHECK_EQ(wrap->persistent().IsEmpty(), false);
-
-  bool readable, writable;
-
-  if (status) {
-    readable = writable = 0;
-  } else {
-    readable = uv_is_readable(req->handle) != 0;
-    writable = uv_is_writable(req->handle) != 0;
-  }
-
-  Local<Object> req_wrap_obj = req_wrap->object();
-  Local<Value> argv[5] = {
-    Integer::New(env->isolate(), status),
-    wrap->object(),
-    req_wrap_obj,
-    Boolean::New(env->isolate(), readable),
-    Boolean::New(env->isolate(), writable)
-  };
-
-  req_wrap->MakeCallback(env->oncomplete_string(), arraysize(argv), argv);
-
-  delete req_wrap;
-}
-
-
 void PipeWrap::Open(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
@@ -208,7 +193,7 @@ void PipeWrap::Connect(const FunctionCallbackInfo<Value>& args) {
 
   ConnectWrap* req_wrap =
       new ConnectWrap(env, req_wrap_obj, AsyncWrap::PROVIDER_PIPECONNECTWRAP);
-  uv_pipe_connect(&req_wrap->req_,
+  uv_pipe_connect(req_wrap->req(),
                   &wrap->handle_,
                   *name,
                   AfterConnect);

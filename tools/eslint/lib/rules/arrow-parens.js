@@ -5,6 +5,12 @@
 "use strict";
 
 //------------------------------------------------------------------------------
+// Requirements
+//------------------------------------------------------------------------------
+
+const astUtils = require("../ast-utils");
+
+//------------------------------------------------------------------------------
 // Rule Definition
 //------------------------------------------------------------------------------
 
@@ -51,16 +57,18 @@ module.exports = {
          * @returns {void}
          */
         function parens(node) {
-            const token = sourceCode.getFirstToken(node);
+            const token = sourceCode.getFirstToken(node, node.async ? 1 : 0);
 
             // "as-needed", { "requireForBlockBody": true }: x => x
             if (
                 requireForBlockBody &&
                 node.params.length === 1 &&
                 node.params[0].type === "Identifier" &&
-                node.body.type !== "BlockStatement"
+                !node.params[0].typeAnnotation &&
+                node.body.type !== "BlockStatement" &&
+                !node.returnType
             ) {
-                if (token.type === "Punctuator" && token.value === "(") {
+                if (astUtils.isOpeningParenToken(token)) {
                     context.report({
                         node,
                         message: requireForBlockBodyMessage,
@@ -82,12 +90,12 @@ module.exports = {
                 requireForBlockBody &&
                 node.body.type === "BlockStatement"
             ) {
-                if (token.type !== "Punctuator" || token.value !== "(") {
+                if (!astUtils.isOpeningParenToken(token)) {
                     context.report({
                         node,
                         message: requireForBlockBodyNoParensMessage,
                         fix(fixer) {
-                            return fixer.replaceText(token, "(" + token.value + ")");
+                            return fixer.replaceText(token, `(${token.value})`);
                         }
                     });
                 }
@@ -95,8 +103,13 @@ module.exports = {
             }
 
             // "as-needed": x => x
-            if (asNeeded && node.params.length === 1 && node.params[0].type === "Identifier") {
-                if (token.type === "Punctuator" && token.value === "(") {
+            if (asNeeded &&
+                node.params.length === 1 &&
+                node.params[0].type === "Identifier" &&
+                !node.params[0].typeAnnotation &&
+                !node.returnType
+            ) {
+                if (astUtils.isOpeningParenToken(token)) {
                     context.report({
                         node,
                         message: asNeededMessage,
@@ -123,7 +136,7 @@ module.exports = {
                         node,
                         message,
                         fix(fixer) {
-                            return fixer.replaceText(token, "(" + token.value + ")");
+                            return fixer.replaceText(token, `(${token.value})`);
                         }
                     });
                 }

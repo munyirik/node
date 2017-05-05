@@ -40,6 +40,16 @@ HRESULT __stdcall SetEnableCheckMemoryLeakOutput(bool flag)
     return S_OK;
 }
 
+#if ENABLE_NATIVE_CODEGEN
+#ifdef _WIN32
+void __stdcall ConnectJITServer(HANDLE processHandle, void* serverSecurityDescriptor, UUID connectionId)
+{
+    JITManager::GetJITManager()->EnableOOPJIT();
+    ThreadContext::SetJITConnectionInfo(processHandle, serverSecurityDescriptor, connectionId);
+}
+#endif
+#endif
+
 void __stdcall NotifyUnhandledException(PEXCEPTION_POINTERS exceptionInfo)
 {
 #ifdef GENERATE_DUMP
@@ -115,13 +125,15 @@ void __stdcall NotifyUnhandledException(PEXCEPTION_POINTERS exceptionInfo)
 #undef FLAG_NumberPairSet
 #undef FLAG_NumberRange
 
-HRESULT OnChakraCoreLoaded()
+HRESULT OnChakraCoreLoaded(OnChakraCoreLoadedPtr pfChakraCoreLoaded)
 {
-    typedef HRESULT(__stdcall *OnChakraCoreLoadedPtr)(TestHooks &testHooks);
-    OnChakraCoreLoadedPtr pfChakraCoreLoaded = (OnChakraCoreLoadedPtr)GetProcAddress(GetModuleHandle(NULL), "OnChakraCoreLoadedEntry");
     if (pfChakraCoreLoaded == nullptr)
     {
-        return S_OK;
+        pfChakraCoreLoaded = (OnChakraCoreLoadedPtr)GetProcAddress(GetModuleHandle(NULL), "OnChakraCoreLoadedEntry");
+        if (pfChakraCoreLoaded == nullptr)
+        {
+            return S_OK;
+        }
     }
 
     TestHooks testHooks =
@@ -152,10 +164,11 @@ HRESULT OnChakraCoreLoaded()
 #undef FLAG_NumberSet
 #undef FLAG_NumberPairSet
 #undef FLAG_NumberRange
-
+#if ENABLE_NATIVE_CODEGEN && _WIN32
+        ConnectJITServer,
+#endif
         NotifyUnhandledException
     };
-
     return pfChakraCoreLoaded(testHooks);
 }
 

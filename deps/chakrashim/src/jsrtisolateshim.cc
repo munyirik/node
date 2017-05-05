@@ -20,9 +20,194 @@
 
 #include "v8.h"
 #include "jsrtutils.h"
+#include "chakra_natives.h"
 #include <assert.h>
 #include <vector>
 #include <algorithm>
+#include "v8-debug.h"
+#include "jsrtdebug.h"
+#include "jsrtinspector.h"
+
+/////////////////////////////////////////////////
+
+void TTReportLastIOError() {
+#ifdef _WIN32
+        DWORD lastError = GetLastError();
+        LPTSTR pTemp = NULL;
+        FormatMessage(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+            FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_ARGUMENT_ARRAY,
+            NULL, lastError, 0, (LPTSTR)&pTemp, 0, NULL);
+        fprintf(stderr, "Error is: %i %s\n", lastError, pTemp);
+#else
+        fprintf(stderr, "Error is: %i %s\n", errno, strerror(errno));
+#endif
+}
+
+#ifdef _WIN32
+#include <io.h>
+
+#define TTHostPathSep '\\'
+
+bool TTDHostPathEndsWithSepChar(size_t pathLength, const char* path)
+{
+    char ec = path[pathLength - 1];
+
+    if((ec & 0x80) != 0)
+    {
+        return false; //a multibyte char so definitely not path separator
+    }
+    else
+    {
+        return (ec == '\\' || ec == '/'); //both ok for windows
+    }
+}
+
+JsTTDStreamHandle TTDHostOpen(size_t pathLength, const char* path, bool isWrite)
+{
+    errno_t err = 0;
+    FILE* res = nullptr;
+    wchar_t wpath[MAX_PATH];
+
+    int length = MultiByteToWideChar(CP_UTF8, 0, path, (int)pathLength, wpath, MAX_PATH);
+    if(length == 0 || length >= MAX_PATH) {
+        fprintf(stderr, "Failed to open file %s\n", path);
+        fprintf(stderr, "Path overflowed MAX_PATH or conversion failed\n.");
+    }
+
+    wpath[length] = L'\0';
+    err = _wfopen_s(&res, wpath, isWrite ? L"w+b" : L"r+b");
+
+    if(err != 0) {
+        fprintf(stderr, "Failed to open file %s\n", path);
+        fprintf(stderr, "Expanded to %ls on Windows\n", wpath);
+        TTReportLastIOError();
+
+        exit(1);
+    }
+
+    return (JsTTDStreamHandle)res;
+}
+
+#define TTDHostRead(buff, size, handle) fread_s(buff, size, 1, size, (FILE*)handle);
+#define TTDHostWrite(buff, size, handle) fwrite(buff, 1, size, (FILE*)handle)
+#else
+#include <unistd.h>
+#include <cstring>
+
+#define memcpy_s(DST, DSTLENGTH, SRC, COUNT) memcpy(DST, SRC, COUNT)
+#define CALLBACK 
+
+#define TTHostPathSep '/'
+
+bool TTDHostPathEndsWithSepChar(size_t pathLength, const char* path)
+{
+    char ec = path[pathLength - 1];
+
+    if((ec & 0x80) != 0)
+    {
+        return false; //a multibyte char so definitely not path separator
+    }
+    else
+    {
+        return ec == '/'; //only forward allowed
+    }
+}
+
+JsTTDStreamHandle TTDHostOpen(size_t pathLength, const char* path, bool isWrite) {
+    FILE* res = fopen(path, isWrite ? "w+b" : "r+b");
+    if(res == nullptr) {
+        fprintf(stderr, "Failed to open file %s\n", path);
+        TTReportLastIOError();
+
+        exit(1);
+    }
+
+    return (JsTTDStreamHandle)res;
+}
+
+#define TTDHostRead(buff, size, handle) fread(buff, 1, size, (FILE*)handle)
+#define TTDHostWrite(buff, size, handle) fwrite(buff, 1, size, (FILE*)handle)
+#endif
+
+#define MAX_URI_LENGTH 512
+
+JsTTDStreamHandle CALLBACK TTCreateStreamCallback(size_t uriLength, const char* uri,
+    size_t asciiNameLength, const char* asciiName, 
+    bool read, bool write) {
+
+    if(uriLength == 0)
+    {
+        fprintf(stderr, "Empty path not allowed.\n");
+        exit(1);
+    }
+
+    if(uriLength + asciiNameLength + 2 > MAX_URI_LENGTH)
+    {
+        fprintf(stderr, "Max allowed path length is %u, given path %s%s\n", MAX_URI_LENGTH, uri, asciiName);
+        exit(1);
+    }
+
+    char path[MAX_URI_LENGTH];
+    memset(path, 0, MAX_URI_LENGTH);
+    memcpy_s(path, MAX_URI_LENGTH, uri, uriLength);
+
+    size_t pathLength = uriLength;
+    if(!TTDHostPathEndsWithSepChar(pathLength, path))
+    {
+        path[pathLength] = TTHostPathSep;
+        pathLength++;
+    }
+
+    memcpy_s(path + pathLength, MAX_URI_LENGTH - pathLength, asciiName, asciiNameLength);
+
+    //error is reported and abort in host open
+    return TTDHostOpen(pathLength + asciiNameLength, path, write);
+}
+
+bool CALLBACK TTReadBytesFromStreamCallback(JsTTDStreamHandle handle,
+    byte* buff, size_t size, size_t* readCount) {
+
+    bool ok = false;
+    *readCount = TTDHostRead(buff, size, (FILE*)handle);
+    ok = (*readCount != 0);
+
+    if(!ok)
+    {
+        fprintf(stderr, "Failed read from stream!!!");
+        TTReportLastIOError();
+
+        exit(1);
+    }
+
+    return ok ? true : false;
+}
+
+bool CALLBACK TTWriteBytesToStreamCallback(JsTTDStreamHandle handle,
+    const byte* buff, size_t size, size_t* writtenCount) {
+
+    bool ok = false;
+    *writtenCount = TTDHostWrite(buff, size, (FILE*)handle);
+    ok = (*writtenCount == size);
+
+    if(!ok)
+    {
+        fprintf(stderr, "Failed read from stream!!!");
+        TTReportLastIOError();
+
+        exit(1);
+    }
+
+    return ok ? true : false;
+}
+
+void CALLBACK TTFlushAndCloseStreamCallback(JsTTDStreamHandle handle,
+    bool read, bool write) {
+    fflush((FILE*)handle);
+    fclose((FILE*)handle);
+}
+
+/////////////////////////////////////////////////
 
 namespace v8 {
 #ifdef NODE_ENGINE_CHAKRA
@@ -33,17 +218,21 @@ extern bool g_disableIdleGc;
 }
 namespace jsrt {
 
-/* static */ __declspec(thread) IsolateShim * IsolateShim::s_currentIsolate;
+/* static */ THREAD_LOCAL IsolateShim * IsolateShim::s_currentIsolate;
+/* static */ THREAD_LOCAL IsolateShim * IsolateShim::s_previousIsolate;
+
 /* static */ IsolateShim * IsolateShim::s_isolateList = nullptr;
 
 IsolateShim::IsolateShim(JsRuntimeHandle runtime)
-    : runtime(runtime),
-      contextScopeStack(nullptr),
+    : arrayBufferAllocator(nullptr),
+      debugContext(nullptr),
+      runtime(runtime),
       symbolPropertyIdRefs(),
       cachedPropertyIdRefs(),
-      embeddedData(),
       isDisposing(false),
-      tryCatchStackTop(nullptr) {
+      contextScopeStack(nullptr),
+      tryCatchStackTop(nullptr),
+      embeddedData() {
   // CHAKRA-TODO: multithread locking for s_isolateList?
   this->prevnext = &s_isolateList;
   this->next = s_isolateList;
@@ -62,37 +251,66 @@ IsolateShim::~IsolateShim() {
   }
 }
 
-/* static */ v8::Isolate * IsolateShim::New() {
-  // CHAKRA-TODO: Disable multiple isolate for now until it is fully implemented
-  if (s_isolateList != nullptr) {
-    CHAKRA_UNIMPLEMENTED_("multiple isolate");
+/* static */ v8::Isolate * IsolateShim::New(size_t optReplayUriLength, const char* optReplayUri,
+    bool doRecord, bool doReplay, bool doDebug,
+    uint32_t snapInterval, uint32_t snapHistoryLength) {
+  bool disableIdleGc = v8::g_disableIdleGc;
+    JsRuntimeAttributes attributes = static_cast<JsRuntimeAttributes>(
+      JsRuntimeAttributeAllowScriptInterrupt |
+      JsRuntimeAttributeEnableExperimentalFeatures |
+        (disableIdleGc ? JsRuntimeAttributeNone : JsRuntimeAttributeEnableIdleProcessing));
+
+  JsRuntimeHandle runtime;
+  JsErrorCode error;
+  if (!(doRecord || doReplay)) {
+      error = JsCreateRuntime(attributes, nullptr, &runtime);
+  } else {
+    if (doRecord) {
+      error = JsTTDCreateRecordRuntime(attributes, snapInterval, snapHistoryLength,
+                                       &TTCreateStreamCallback,
+                                       &TTWriteBytesToStreamCallback,
+                                       &TTFlushAndCloseStreamCallback,
+                                       nullptr, &runtime);
+    } else {
+      error = JsTTDCreateReplayRuntime(attributes, optReplayUri, optReplayUriLength,
+                                       doDebug, 
+                                       &TTCreateStreamCallback,
+                                       &TTReadBytesFromStreamCallback,
+                                       &TTFlushAndCloseStreamCallback,
+                                       nullptr, &runtime);
+    }
+  }
+
+  if (error != JsNoError) {
     return nullptr;
   }
 
-  bool disableIdleGc = v8::g_disableIdleGc;
-  JsRuntimeHandle runtime;
-  JsErrorCode error =
-    JsCreateRuntime(static_cast<JsRuntimeAttributes>(
-      JsRuntimeAttributeAllowScriptInterrupt |
-      JsRuntimeAttributeEnableExperimentalFeatures |
-      (disableIdleGc ? JsRuntimeAttributeNone :
-       JsRuntimeAttributeEnableIdleProcessing)), nullptr, &runtime);
-  if (error != JsNoError) {
-    return nullptr;
+  if (Inspector::IsInspectorEnabled()) {
+    // If JavaScript debugging APIs need to be exposed then
+    // runtime should be in debugging mode from start
+    Inspector::StartDebugging(runtime);
+  }
+  else if (Debugger::IsDebugEnabled()) {
+    // If JavaScript debugging APIs need to be exposed then
+    // runtime should be in debugging mode from start
+    Debugger::StartDebugging(runtime);
   }
 
   IsolateShim* newIsolateshim = new IsolateShim(runtime);
   if (!disableIdleGc) {
     uv_prepare_init(uv_default_loop(), newIsolateshim->idleGc_prepare_handle());
-    uv_unref(reinterpret_cast<uv_handle_t*>(newIsolateshim->idleGc_prepare_handle()));
-    uv_timer_init(uv_default_loop(), newIsolateshim->idleGc_timer_handle());
-    uv_unref(reinterpret_cast<uv_handle_t*>(newIsolateshim->idleGc_timer_handle()));
+    uv_unref(reinterpret_cast<uv_handle_t*>(
+      newIsolateshim->idleGc_prepare_handle()));
+    uv_timer_init(uv_default_loop(),
+      newIsolateshim->idleGc_timer_handle());
+    uv_unref(reinterpret_cast<uv_handle_t*>(
+      newIsolateshim->idleGc_timer_handle()));
   }
   return ToIsolate(newIsolateshim);
 }
 
 /* static */ IsolateShim * IsolateShim::FromIsolate(v8::Isolate * isolate) {
-  return reinterpret_cast<jsrt::IsolateShim *>(isolate);
+  return reinterpret_cast<IsolateShim *>(isolate);
 }
 
 /* static */ v8::Isolate * IsolateShim::ToIsolate(IsolateShim * isolateShim) {
@@ -112,7 +330,8 @@ IsolateShim::~IsolateShim() {
 void IsolateShim::Enter() {
   // CHAKRA-TODO: we don't support multiple isolate currently, this also doesn't
   // support reentrence
-  assert(s_currentIsolate == nullptr);
+  assert(s_currentIsolate == nullptr || s_currentIsolate == this);
+  s_previousIsolate = s_currentIsolate;
   s_currentIsolate = this;
 }
 
@@ -120,7 +339,8 @@ void IsolateShim::Exit() {
   // CHAKRA-TODO: we don't support multiple isolate currently, this also doesn't
   // support reentrence
   assert(s_currentIsolate == this);
-  s_currentIsolate = nullptr;
+  s_currentIsolate = s_previousIsolate;
+  s_previousIsolate = nullptr;
 }
 
 JsRuntimeHandle IsolateShim::GetRuntimeHandle() {
@@ -160,17 +380,23 @@ bool IsolateShim::IsDisposing() {
 
 // CHAKRA-TODO: This is not called after cross context work in chakra. Fix this
 // else we will leak chakrashim object.
-void CALLBACK IsolateShim::JsContextBeforeCollectCallback(JsRef contextRef,
-                                                          void *data) {
+void CHAKRA_CALLBACK IsolateShim::JsContextBeforeCollectCallback(
+    JsRef contextRef, void *data) {
   IsolateShim * isolateShim = reinterpret_cast<IsolateShim *>(data);
   ContextShim * contextShim = isolateShim->GetContextShim(contextRef);
+
+  // TTD_NODE
+  JsTTDNotifyContextDestroy(contextRef);
+
   delete contextShim;
 }
 
 bool IsolateShim::NewContext(JsContextRef * context, bool exposeGC,
+                             bool useGlobalTTState,
                              JsValueRef globalObjectTemplateInstance) {
-  ContextShim * contextShim =
-    ContextShim::New(this, exposeGC, globalObjectTemplateInstance);
+  ContextShim * contextShim = ContextShim::New(this, exposeGC,
+                                               useGlobalTTState, 
+                                               globalObjectTemplateInstance);
   if (contextShim == nullptr) {
     return false;
   }
@@ -196,7 +422,7 @@ ContextShim * IsolateShim::GetContextShim(JsContextRef contextRef) {
   if (JsGetContextData(contextRef, &data) != JsNoError) {
     return nullptr;
   }
-  ContextShim* contextShim = static_cast<jsrt::ContextShim *>(data);
+  ContextShim* contextShim = static_cast<ContextShim *>(data);
   return contextShim;
 }
 
@@ -228,6 +454,7 @@ void IsolateShim::PushScope(
   // Don't crash even if we fail to set the context
   JsErrorCode errorCode = JsSetCurrentContext(contextShim->GetContextRef());
   CHAKRA_ASSERT(errorCode == JsNoError);
+  UNUSED(errorCode);
 
   contextShim->EnsureInitialized();
 }
@@ -241,13 +468,13 @@ void IsolateShim::PopScope(ContextShim::Scope * scope) {
     if (scope->contextShim != prevScope->contextShim &&
         JsHasException(&hasException) == JsNoError &&
         hasException &&
-        JsGetAndClearException(&exception) == JsNoError) {
-    }
+        JsGetAndClearException(&exception) == JsNoError) {;}
 
     // Don't crash even if we fail to set the context
     JsErrorCode errorCode = JsSetCurrentContext(
       prevScope->contextShim->GetContextRef());
     CHAKRA_ASSERT(errorCode == JsNoError);
+    UNUSED(errorCode);
 
     // Propagate the exception to parent scope
     if (exception != JS_INVALID_REFERENCE) {
@@ -296,9 +523,9 @@ JsPropertyIdRef IsolateShim::GetCachedSymbolPropertyIdRef(
   });
 }
 
-static wchar_t const *
+static char const *
 const s_cachedPropertyIdRefNames[CachedPropertyIdRef::Count] = {
-#define DEF(x) L#x,
+#define DEF(x) #x,
 #include "jsrtcachedpropertyidref.inc"
 };
 
@@ -306,8 +533,8 @@ JsPropertyIdRef IsolateShim::GetCachedPropertyIdRef(
     CachedPropertyIdRef cachedPropertyIdRef) {
   return GetCachedPropertyId(cachedPropertyIdRefs, cachedPropertyIdRef,
                     [](CachedPropertyIdRef index, JsPropertyIdRef* propIdRef) {
-    return JsGetPropertyIdFromName(s_cachedPropertyIdRefNames[index],
-                                   propIdRef) == JsNoError;
+    return CreatePropertyId(s_cachedPropertyIdRefNames[index],
+      propIdRef) == JsNoError;
   });
 }
 
@@ -323,6 +550,10 @@ ContextShim * IsolateShim::GetContextShimOfObject(JsValueRef valueRef) {
   }
   assert(contextRef != nullptr);
   return GetContextShim(contextRef);
+}
+
+void IsolateShim::RequestInterrupt(v8::InterruptCallback callback, void* data) {
+  Inspector::RequestAsyncBreak(this->GetRuntimeHandle(), callback, data);
 }
 
 void IsolateShim::DisableExecution() {
@@ -369,4 +600,123 @@ void* IsolateShim::GetData(uint32_t slot) {
   return slot < _countof(this->embeddedData) ? embeddedData[slot] : nullptr;
 }
 
+JsValueRef IsolateShim::GetChakraShimJsArrayBuffer() {
+  JsValueRef chakraShimArrayBuffer;
+  CHAKRA_VERIFY(JsCreateExternalArrayBuffer(
+                (void*)raw_chakra_shim_value,
+                sizeof(raw_chakra_shim_value),
+                nullptr, nullptr,
+                &chakraShimArrayBuffer) == JsNoError);
+  return chakraShimArrayBuffer;
+}
+
+JsValueRef IsolateShim::GetChakraDebugShimJsArrayBuffer() {
+  JsValueRef chakraDebugShimArrayBuffer;
+  CHAKRA_VERIFY(JsCreateExternalArrayBuffer(
+                (void*)raw_chakra_debug_value,
+                sizeof(raw_chakra_debug_value),
+                nullptr, nullptr,
+                &chakraDebugShimArrayBuffer) == JsNoError);
+  return chakraDebugShimArrayBuffer;
+}
+
+JsValueRef IsolateShim::GetChakraInspectorShimJsArrayBuffer() {
+  JsValueRef chakraInspectorShimArrayBuffer;
+  CHAKRA_VERIFY(JsCreateExternalArrayBuffer(
+                (void*)raw_chakra_inspector_value,
+                sizeof(raw_chakra_inspector_value),
+                nullptr, nullptr,
+                &chakraInspectorShimArrayBuffer) == JsNoError);
+  return chakraInspectorShimArrayBuffer;
+}
+
+/*static*/
+bool IsolateShim::RunSingleStepOfReverseMoveLoop(v8::Isolate* isolate,
+                                                 uint64_t* moveMode,
+                                                 int64_t* nextEventTime) {
+    int64_t snapEventTime = -1;
+    int64_t snapEventEndTime = -1;
+    int64_t origNETime = *nextEventTime;
+    // TODO(mrkmarron) JsTTDMoveMode is no longer 64 bit wide, fix use of
+    // moveMode parameter, convert to 32 bit?
+    JsTTDMoveMode _moveMode = (JsTTDMoveMode)(*moveMode);
+    JsRuntimeHandle rHandle = jsrt::IsolateShim::FromIsolate(isolate)->GetRuntimeHandle();
+
+    // if mode is reverse continue then we need to scan
+    if ((_moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalForContinue)
+                     == JsTTDMoveMode::JsTTDMoveScanIntervalForContinue) {
+        int64_t ciStart = -1;
+        int64_t ciEnd = -1;
+        JsTTDGetSnapShotBoundInterval(rHandle, *nextEventTime,
+                                      &ciStart, &ciEnd);
+
+        *nextEventTime = -1;
+        JsTTDPreExecuteSnapShotInterval(rHandle, ciStart, ciEnd,
+                                        ((JsTTDMoveMode)(*moveMode)),
+                                        nextEventTime);
+
+        while (*nextEventTime == -1) {
+            int64_t newCiStart = -1;
+            JsTTDGetPreviousSnapshotInterval(rHandle, ciStart, &newCiStart);
+
+            if (newCiStart == -1) {
+                // no previous so break on first
+                _moveMode = (JsTTDMoveMode)(_moveMode |
+                    JsTTDMoveMode::JsTTDMoveFirstEvent);
+                break;
+            }
+
+            ciEnd = ciStart;
+            ciStart = newCiStart;
+            JsTTDPreExecuteSnapShotInterval(rHandle, ciStart, ciEnd,
+                                            ((JsTTDMoveMode)(*moveMode)),
+                                            nextEventTime);
+        }
+
+        // did scan so no longer needed
+        _moveMode = (JsTTDMoveMode)(_moveMode &
+                     ~JsTTDMoveMode::JsTTDMoveScanIntervalForContinue);
+    }
+
+    JsErrorCode timeError = JsTTDGetSnapTimeTopLevelEventMove(rHandle,
+                                                              _moveMode,
+                                                              0,
+                                                              nextEventTime,
+                                                              &snapEventTime,
+                                                              &snapEventEndTime);
+
+    if (timeError != JsNoError) {
+        if (timeError == JsErrorCategoryUsage) {
+            fprintf(stderr, "Start time not in log range.");
+            exit(0);
+        } else {
+            fprintf(stderr, "Fatal Error in Move!!!");
+            exit(1);
+        }
+    }
+
+    JsErrorCode moveError = JsTTDMoveToTopLevelEvent(rHandle, _moveMode,
+                                                     snapEventTime,
+                                                     *nextEventTime);
+    if(moveError != JsNoError)
+    {
+        fprintf(stderr, "Fatal Error in Move Action!!!");
+        exit(1);
+    }
+
+    JsErrorCode replayError = JsTTDReplayExecution(&_moveMode, nextEventTime);
+    if(replayError != JsNoError)
+    {
+        fprintf(stderr, "Fatal Error in Replay Action!!!");
+        exit(1);
+    }
+
+    // update before we return
+    *moveMode = (uint64_t)_moveMode;
+    if (*nextEventTime == -1) {
+        fprintf(stderr, "\nReached end of Execution -- Exiting.\n");
+        return false;
+    }
+    return true;
+}
 }  // namespace jsrt

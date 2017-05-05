@@ -55,18 +55,32 @@
 #define USE_EDGEMODE_JSRT     // Only works with edge JSRT
 #endif
 
-#include <jsrt.h>
 
-#include <stdio.h>
-#include <stdint.h>
+#include <jsrt.h>
+#if !defined(OSX_SDK_TR1) && defined(__APPLE__)
+#include <AvailabilityMacros.h>
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < MAC_OS_X_VERSION_10_9
+#define OSX_SDK_TR1
+#endif
+#endif
+
 #include <memory>
+#include "ChakraCore.h"
 #include "v8-version.h"
 #include "v8config.h"
 
+#ifdef _WIN32
 #ifdef BUILDING_CHAKRASHIM
 #define V8_EXPORT __declspec(dllexport)
 #else
 #define V8_EXPORT __declspec(dllimport)
+#endif
+#else  // !_WIN32
+#ifdef BUILDING_CHAKRASHIM
+#define V8_EXPORT __attribute__ ((visibility("default")))
+#else
+#define V8_EXPORT
+#endif
 #endif
 
 #define TYPE_CHECK(T, S)                                       \
@@ -101,11 +115,13 @@ class Platform;
 class ResourceConstraints;
 class RegExp;
 class Promise;
+class PropertyDescriptor;
 class Proxy;
 class Script;
 class Signature;
 class StartupData;
 class StackFrame;
+class StackTrace;
 class String;
 class StringObject;
 class Uint32;
@@ -288,18 +304,23 @@ class Local {
   friend class FunctionTemplateData;
   friend class HandleScope;
   friend class Integer;
+  friend class Map;
   friend class Number;
   friend class NumberObject;
   friend class Object;
   friend class ObjectTemplate;
   friend class Private;
+  friend class PropertyDescriptor;
   friend class Proxy;
+  friend class RegExp;
   friend class Signature;
   friend class Script;
   friend class StackFrame;
   friend class StackTrace;
   friend class String;
   friend class StringObject;
+  friend class Symbol;
+  friend class SymbolObject;
   friend class Utils;
   friend class TryCatch;
   friend class UnboundScript;
@@ -314,8 +335,7 @@ class Local {
   friend V8_EXPORT Local<Boolean> True(Isolate* isolate);
   friend V8_EXPORT Local<Boolean> False(Isolate* isolate);
 
-  template <class S>
-  V8_INLINE Local(S* that)
+  explicit V8_INLINE Local(T* that)
       : val_(that) {}
   V8_INLINE static Local<T> New(Isolate* isolate, T* that) {
     return New(that);
@@ -358,10 +378,7 @@ class MaybeLocal {
     return !IsEmpty();
   }
 
-  Local<T> ToLocalChecked() {
-    if (V8_UNLIKELY(val_ == nullptr)) V8::ToLocalEmpty();
-    return Local<T>(val_);
-  }
+  V8_INLINE Local<T> ToLocalChecked();
 
   template <class S>
   Local<S> FromMaybe(Local<S> default_value) const {
@@ -444,7 +461,6 @@ struct WeakReferenceCallbackWrapper {
   };
   bool isWeakCallbackInfo;
 };
-template class V8_EXPORT std::shared_ptr<WeakReferenceCallbackWrapper>;
 
 // A helper method for setting an object with a WeakReferenceCallback. The
 // callback will be called before the object is released.
@@ -452,12 +468,12 @@ V8_EXPORT void SetObjectWeakReferenceCallback(
   JsValueRef object,
   WeakCallbackInfo<void>::Callback callback,
   void* parameters,
-  std::shared_ptr<WeakReferenceCallbackWrapper>* weakWrapper);
+  WeakReferenceCallbackWrapper** weakWrapper);
 V8_EXPORT void SetObjectWeakReferenceCallback(
   JsValueRef object,
   WeakCallbackData<Value, void>::Callback callback,
   void* parameters,
-  std::shared_ptr<WeakReferenceCallbackWrapper>* weakWrapper);
+  WeakReferenceCallbackWrapper** weakWrapper);
 // A helper method for turning off the WeakReferenceCallback that was set using
 // the previous method
 V8_EXPORT void ClearObjectWeakReferenceCallback(JsValueRef object, bool revive);
@@ -478,6 +494,10 @@ class PersistentBase {
 
   V8_INLINE bool IsEmpty() const { return val_ == NULL; }
   V8_INLINE void Empty() { Reset(); }
+
+  V8_INLINE Local<T> Get(Isolate* isolate) const {
+    return Local<T>::New(isolate, *this);
+  }
 
   template <class S>
   V8_INLINE bool operator==(const PersistentBase<S>& that) const {
@@ -523,9 +543,12 @@ class PersistentBase {
 
  private:
   template<class F> friend class Local;
+  template<class F> friend class Global;
   template<class F1, class F2> friend class Persistent;
+  template <class F> friend class Global;
 
-  explicit V8_INLINE PersistentBase(T* val) : val_(val) {}
+  explicit V8_INLINE PersistentBase(T* val)
+      : val_(val), _weakWrapper(nullptr) {}
   PersistentBase(PersistentBase& other) = delete;  // NOLINT
   void operator=(PersistentBase&) = delete;
   V8_INLINE static T* New(Isolate* isolate, T* that);
@@ -534,7 +557,7 @@ class PersistentBase {
   void SetWeakCommon(P* parameter, Callback callback);
 
   T* val_;
-  std::shared_ptr<chakrashim::WeakReferenceCallbackWrapper> _weakWrapper;
+  chakrashim::WeakReferenceCallbackWrapper* _weakWrapper;
 };
 
 
@@ -640,7 +663,7 @@ class Persistent : public PersistentBase<T> {
 
   template <class S>
   V8_INLINE Persistent& operator=(const Local<S>& other) {
-    Reset(nullptr, other);
+    this->Reset(nullptr, other);
     return *this;
   }
   V8_INLINE Persistent& operator=(JsRef other) {
@@ -669,7 +692,12 @@ class Global : public PersistentBase<T> {
   V8_INLINE Global(Global&& other) : PersistentBase<T>(other.val_) {
     this->_weakWrapper = other._weakWrapper;
     other.val_ = nullptr;
-    other._weakWrapper.reset();
+    other._weakWrapper = nullptr;
+  }
+
+  template <class S>
+  static Global<S> New(Isolate* isolate, Local<S> that) {
+    return Global<S>(isolate, that);
   }
 
   V8_INLINE ~Global() { this->Reset(); }
@@ -682,7 +710,7 @@ class Global : public PersistentBase<T> {
       this->val_ = rhs.val_;
       this->_weakWrapper = rhs._weakWrapper;
       rhs.val_ = nullptr;
-      rhs._weakWrapper.reset();
+      rhs._weakWrapper = nullptr;
     }
     return *this;
   }
@@ -710,7 +738,7 @@ class Eternal : private Persistent<T> {
   }
 
   template<class S> void Set(Isolate* isolate, Local<S> handle) {
-    Reset(isolate, handle);
+    this->Reset(isolate, handle);
   }
 };
 
@@ -736,11 +764,12 @@ class V8_EXPORT HandleScope {
   template <class T> friend class Local;
   static const int kOnStackLocals = 8;  // Arbitrary number of refs on stack
 
+  HandleScope *_prev;
+
   // Save some refs on stack. 1st element on stack
   // is the JavascriptArray where other refs go.
   JsValueRef _locals[kOnStackLocals + 1];
   int _count;
-  HandleScope *_prev;
   JsContextRef _contextRef;
   struct AddRefRecord {
     JsRef _ref;
@@ -776,10 +805,16 @@ class ScriptOrigin {
   explicit ScriptOrigin(
     Local<Value> resource_name,
     Local<Integer> resource_line_offset = Local<Integer>(),
-    Local<Integer> resource_column_offset = Local<Integer>()) :
-      resource_name_(resource_name),
+    Local<Integer> resource_column_offset = Local<Integer>(),
+    Local<Boolean> resource_is_shared_cross_origin = Local<Boolean>(),
+    Local<Integer> script_id = Local<Integer>(),
+    Local<Boolean> resource_is_embedder_debug_script = Local<Boolean>(),
+    Local<Value> source_map_url = Local<Value>(),
+    Local<Boolean> resource_is_opaque = Local<Boolean>())
+    : resource_name_(resource_name),
       resource_line_offset_(resource_line_offset),
-      resource_column_offset_(resource_column_offset) {}
+      resource_column_offset_(resource_column_offset),
+      script_id_(script_id) {}
   Local<Value> ResourceName() const {
     return resource_name_;
   }
@@ -789,15 +824,23 @@ class ScriptOrigin {
   Local<Integer> ResourceColumnOffset() const {
     return resource_column_offset_;
   }
+  V8_INLINE Local<Integer> ScriptID() const {
+    return script_id_;
+  }
  private:
   Local<Value> resource_name_;
   Local<Integer> resource_line_offset_;
   Local<Integer> resource_column_offset_;
+  Local<Integer> script_id_;
 };
 
 class V8_EXPORT UnboundScript {
  public:
   Local<Script> BindToCurrentContext();
+
+  int GetId();
+
+  static const int kNoScriptId = 0;
 };
 
 class V8_EXPORT Script {
@@ -884,15 +927,23 @@ class V8_EXPORT ScriptCompiler {
   static V8_WARN_UNUSED_RESULT MaybeLocal<Script> Compile(
     Local<Context> context, Source* source,
     CompileOptions options = kNoCompileOptions);
+
+  static uint32_t CachedDataVersionTag();
 };
 
 class V8_EXPORT Message {
  public:
+  Local<String> Get() const;
+
   V8_DEPRECATE_SOON("Use maybe version", Local<String> GetSourceLine()) const;
   V8_WARN_UNUSED_RESULT MaybeLocal<String> GetSourceLine(
       Local<Context> context) const;
 
+  ScriptOrigin GetScriptOrigin() const;
+
   Handle<Value> GetScriptResourceName() const;
+
+  Local<StackTrace> GetStackTrace() const;
 
   V8_DEPRECATE_SOON("Use maybe version", int GetLineNumber()) const;
   V8_WARN_UNUSED_RESULT Maybe<int> GetLineNumber(Local<Context> context) const;
@@ -954,7 +1005,9 @@ class V8_EXPORT Value : public Data {
   bool IsNull() const;
   bool IsTrue() const;
   bool IsFalse() const;
+  bool IsName() const;
   bool IsString() const;
+  bool IsSymbol() const;
   bool IsFunction() const;
   bool IsArray() const;
   bool IsObject() const;
@@ -963,11 +1016,14 @@ class V8_EXPORT Value : public Data {
   bool IsInt32() const;
   bool IsUint32() const;
   bool IsDate() const;
+  bool IsArgumentsObject() const;
   bool IsBooleanObject() const;
   bool IsNumberObject() const;
   bool IsStringObject() const;
+  bool IsSymbolObject() const;
   bool IsNativeError() const;
   bool IsRegExp() const;
+  bool IsGeneratorObject() const;
   bool IsExternal() const;
   bool IsArrayBuffer() const;
   bool IsArrayBufferView() const;
@@ -982,10 +1038,16 @@ class V8_EXPORT Value : public Data {
   bool IsFloat32Array() const;
   bool IsFloat64Array() const;
   bool IsDataView() const;
+  bool IsSharedArrayBuffer() const {
+    // CHAKRA-TODO Not implemented
+    return false;
+  }
   bool IsMapIterator() const;
   bool IsSetIterator() const;
   bool IsMap() const;
   bool IsSet() const;
+  bool IsWeakMap() const;
+  bool IsWeakSet() const;
   bool IsPromise() const;
   bool IsProxy() const;
 
@@ -1062,6 +1124,7 @@ class V8_EXPORT Boolean : public Primitive {
  public:
   bool Value() const;
   static Handle<Boolean> New(Isolate* isolate, bool value);
+  static Boolean* Cast(v8::Value* obj);
 
  private:
   friend class BooleanObject;
@@ -1118,6 +1181,7 @@ class V8_EXPORT String : public Name {
     virtual ~ExternalOneByteStringResource() {}
     virtual const char *data() const = 0;
     virtual size_t length() const = 0;
+    virtual void Dispose() { delete this; }
   };
 
   class V8_EXPORT ExternalStringResource {
@@ -1125,6 +1189,7 @@ class V8_EXPORT String : public Name {
     virtual ~ExternalStringResource() {}
     virtual const uint16_t* data() const = 0;
     virtual size_t length() const = 0;
+    virtual void Dispose() { delete this; }
   };
 
   ExternalStringResource* GetExternalStringResource() const { return nullptr; }
@@ -1212,12 +1277,19 @@ class V8_EXPORT String : public Name {
     uint16_t* _str;
     int _length;
   };
+};
+
+class V8_EXPORT Symbol : public Name {
+ public:
+  // Returns the print name string of the symbol, or undefined if none.
+  Local<Value> Name() const;
+  static Local<Symbol> New(Isolate* isolate, 
+      Local<String> name = Local<String>());
+  static Symbol* Cast(Value* obj);
 
  private:
-  template <class ToWide>
-  static MaybeLocal<String> New(const ToWide& toWide,
-                                const char *data, int length = -1);
-  static MaybeLocal<String> New(const wchar_t *data, int length = -1);
+  static Local<Symbol> From(Local<String> name);
+  Symbol();
 };
 
 class V8_EXPORT Number : public Primitive {
@@ -1271,9 +1343,19 @@ class V8_EXPORT Object : public Value {
   V8_WARN_UNUSED_RESULT Maybe<bool> Set(Local<Context> context, uint32_t index,
                                         Local<Value> value);
 
+  V8_WARN_UNUSED_RESULT Maybe<bool> CreateDataProperty(Local<Context> context,
+                                                       Local<Name> key,
+                                                       Local<Value> value);
+  V8_WARN_UNUSED_RESULT Maybe<bool> CreateDataProperty(Local<Context> context,
+                                                       uint32_t index,
+                                                       Local<Value> value);
+
   V8_WARN_UNUSED_RESULT Maybe<bool> DefineOwnProperty(
       Local<Context> context, Local<Name> key, Local<Value> value,
       PropertyAttribute attributes = None);
+
+  V8_WARN_UNUSED_RESULT Maybe<bool> DefineProperty(
+      Local<Context> context, Local<Name>, PropertyDescriptor& decriptor);
 
   V8_DEPRECATE_SOON("Use maybe version",
                     bool ForceSet(Handle<Value> key, Handle<Value> value,
@@ -1405,6 +1487,11 @@ class V8_EXPORT Object : public Value {
   V8_DEPRECATE_SOON("Use v8::Object::GetPrivate instead.",
                     Local<Value> GetHiddenValue(Handle<String> key));
 
+  void SetAccessorProperty(Local<Name> name, Local<Function> getter,
+                           Local<Function> setter = Local<Function>(),
+                           PropertyAttribute attribute = None,
+                           AccessControl settings = DEFAULT);
+
   Maybe<bool> HasPrivate(Local<Context> context, Local<Private> key);
   Maybe<bool> SetPrivate(Local<Context> context, Local<Private> key,
                          Local<Value> value);
@@ -1477,6 +1564,13 @@ class V8_EXPORT StringObject : public Object {
   static StringObject* Cast(Value* obj);
 };
 
+class V8_EXPORT SymbolObject : public Object {
+ public:
+  static Local<Value> New(Isolate* isolate, Local<Symbol> value);
+  Local<Symbol> ValueOf() const;
+  static SymbolObject* Cast(v8::Value* obj);
+};
+
 class V8_EXPORT NumberObject : public Object {
  public:
   static Local<Value> New(Isolate * isolate, double value);
@@ -1513,6 +1607,48 @@ class V8_EXPORT RegExp : public Object {
   static RegExp *Cast(v8::Value *obj);
 };
 
+
+class V8_EXPORT Map : public Object {
+ public:
+  size_t Size() const;
+  void Clear();
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> Get(Local<Context> context,
+                                              Local<Value> key);
+  V8_WARN_UNUSED_RESULT MaybeLocal<Map> Set(Local<Context> context,
+                                            Local<Value> key,
+                                            Local<Value> value);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Has(Local<Context> context,
+                                        Local<Value> key);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Delete(Local<Context> context,
+                                           Local<Value> key);
+
+  Local<Array> AsArray() const;
+  static Local<Map> New(Isolate* isolate);
+  static Map* Cast(Value* obj);
+
+ private:
+  Map();
+};
+
+class V8_EXPORT Set : public Object {
+ public:
+  size_t Size() const;
+  void Clear();
+  V8_WARN_UNUSED_RESULT MaybeLocal<Set> Add(Local<Context> context,
+                                            Local<Value> key);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Has(Local<Context> context,
+                                        Local<Value> key);
+  V8_WARN_UNUSED_RESULT Maybe<bool> Delete(Local<Context> context,
+                                           Local<Value> key);
+
+  Local<Array> AsArray() const;
+  static Local<Set> New(Isolate* isolate);
+  static Set* Cast(Value* obj);
+
+ private:
+  Set();
+};
+
 template<typename T>
 class ReturnValue {
  public:
@@ -1529,11 +1665,11 @@ class ReturnValue {
   void Set(int32_t value) { Set(Integer::From(value)); }
   void Set(uint32_t value) { Set(Integer::From(value)); }
   // Fast JS primitive setters
-  void SetNull() { Set(Null(nullptr)); }
-  void SetUndefined() { Set(Undefined(nullptr)); }
-  void SetEmptyString() { Set(String::Empty(nullptr)); }
+  V8_INLINE void SetNull();
+  V8_INLINE void SetUndefined();
+  V8_INLINE void SetEmptyString();
   // Convenience getter for Isolate
-  Isolate* GetIsolate() { return Isolate::GetCurrent(); }
+  V8_INLINE Isolate* GetIsolate();
 
   Value* Get() const { return *_value; }
 
@@ -1551,16 +1687,13 @@ template<typename T>
 class FunctionCallbackInfo {
  public:
   int Length() const { return _length; }
-  Local<Value> operator[](int i) const {
-    return (i >= 0 && i < _length) ?
-      _args[i] : Undefined(nullptr).As<Value>();
-  }
+  V8_INLINE Local<Value> operator[](int i) const;
   Local<Function> Callee() const { return _callee; }
   Local<Object> This() const { return _thisPointer; }
   Local<Object> Holder() const { return _holder; }
   bool IsConstructCall() const { return _isConstructorCall; }
   Local<Value> Data() const { return _data; }
-  Isolate* GetIsolate() const { return Isolate::GetCurrent(); }
+  V8_INLINE Isolate* GetIsolate() const;
   ReturnValue<T> GetReturnValue() const {
     return ReturnValue<T>(
       &(const_cast<FunctionCallbackInfo<T>*>(this)->_returnValue));
@@ -1585,13 +1718,13 @@ class FunctionCallbackInfo {
   }
 
  private:
+  Value** _args;
   int _length;
   Local<Object> _thisPointer;
   Local<Object> _holder;
-  Local<Function> _callee;
-  Local<Value> _data;
   bool _isConstructorCall;
-  Value** _args;
+  Local<Value> _data;
+  Local<Function> _callee;
   Value* _returnValue;
 };
 
@@ -1599,7 +1732,7 @@ class FunctionCallbackInfo {
 template<typename T>
 class PropertyCallbackInfo {
  public:
-  Isolate* GetIsolate() const { return Isolate::GetCurrent(); }
+  V8_INLINE Isolate* GetIsolate() const;
   Local<Value> Data() const { return _data; }
   Local<Object> This() const { return _thisObject; }
   Local<Object> Holder() const { return _holder; }
@@ -1617,6 +1750,7 @@ class PropertyCallbackInfo {
          _holder(holder),
          _returnValue(static_cast<Value*>(JS_INVALID_REFERENCE)) {
   }
+
  private:
   Local<Value> _data;
   Local<Object> _thisObject;
@@ -1626,12 +1760,20 @@ class PropertyCallbackInfo {
 
 typedef void (*FunctionCallback)(const FunctionCallbackInfo<Value>& info);
 
+enum class ConstructorBehavior { kThrow, kAllow };
+
 class V8_EXPORT Function : public Object {
  public:
-  static Local<Function> New(Isolate* isolate,
-                             FunctionCallback callback,
-                             Local<Value> data = Local<Value>(),
-                             int length = 0);
+  static MaybeLocal<Function> New(Local<Context> context,
+                                  FunctionCallback callback,
+                                  Local<Value> data = Local<Value>(),
+                                  int length = 0,
+                                  ConstructorBehavior behavior = ConstructorBehavior::kAllow);
+  static V8_DEPRECATE_SOON("Use maybe version",
+                           Local<Function> New(Isolate* isolate,
+                                               FunctionCallback callback,
+                                               Local<Value> data = Local<Value>(),
+                                               int length = 0));
 
   V8_DEPRECATE_SOON("Use maybe version",
                     Local<Object> NewInstance(int argc,
@@ -1653,13 +1795,26 @@ class V8_EXPORT Function : public Object {
                                                Handle<Value> argv[]);
 
   void SetName(Handle<String> name);
-  // Handle<Value> GetName() const;
+  Local<Value> GetName() const;
+
+  Local<Value> GetInferredName() const;
+
+  int GetScriptLineNumber() const;
+  int GetScriptColumnNumber() const;
+
+  int ScriptId() const;
 
   static Function *Cast(Value *obj);
+  static const int kLineOffsetNotFound;
 };
 
 class V8_EXPORT Promise : public Object {
  public:
+  enum PromiseState { kPending, kFulfilled, kRejected };
+
+  Local<Value> Result();
+  PromiseState State();
+
   class V8_EXPORT Resolver : public Object {
    public:
     static Local<Resolver> New(Isolate* isolate);
@@ -1673,13 +1828,58 @@ class V8_EXPORT Promise : public Object {
   };
 
   Local<Promise> Chain(Handle<Function> handler);
-  Local<Promise> Catch(Handle<Function> handler);
-  Local<Promise> Then(Handle<Function> handler);
+
+  V8_DEPRECATED("Use maybe version",
+                Local<Promise> Catch(Local<Function> handler));
+  V8_WARN_UNUSED_RESULT MaybeLocal<Promise> Catch(Local<Context> context,
+                                                  Local<Function> handler);
+
+  V8_DEPRECATED("Use maybe version",
+                Local<Promise> Then(Local<Function> handler));
+  V8_WARN_UNUSED_RESULT MaybeLocal<Promise> Then(Local<Context> context,
+                                                 Local<Function> handler);
 
   bool HasHandler();
   static Promise* Cast(Value* obj);
  private:
   Promise();
+};
+
+class V8_EXPORT PropertyDescriptor {
+ public:
+  PropertyDescriptor();
+  PropertyDescriptor(Local<Value> value);
+  PropertyDescriptor(Local<Value> value, bool writable);
+  PropertyDescriptor(Local<Value> get, Local<Value> set);
+  ~PropertyDescriptor();
+
+  Local<Value> value() const;
+  bool has_value() const;
+
+  Local<Value> get() const;
+  bool has_get() const;
+  Local<Value> set() const;
+  bool has_set() const;
+
+  void set_enumerable(bool enumerable);
+  bool enumerable() const;
+  bool has_enumerable() const;
+
+  void set_configurable(bool configurable);
+  bool configurable() const;
+  bool has_configurable() const;
+
+  bool writable() const;
+  bool has_writable() const;
+
+  struct PrivateData;
+  PrivateData* get_private() const { return private_; }
+
+  PropertyDescriptor(const PropertyDescriptor&) = delete;
+  void operator=(const PropertyDescriptor&) = delete;
+
+ private:
+  PrivateData* private_;
 };
 
 class V8_EXPORT Proxy : public Object {
@@ -1693,7 +1893,7 @@ class V8_EXPORT Proxy : public Object {
                                Local<Object> local_target,
                                Local<Object> local_handler);
 
-  V8_INLINE static Proxy* Cast(Value* obj);
+  static Proxy* Cast(Value* obj);
 
  private:
   Proxy();
@@ -1736,6 +1936,15 @@ class V8_EXPORT ArrayBuffer : public Object {
   void Neuter();
   Contents Externalize();
   Contents GetContents();
+
+// #if ENABLE_TTD_NODE
+  void TTDRawBufferNotifyRegisterForModification(byte* initialModPosition);
+  static void TTDRawBufferAsyncModifyComplete(byte* finalModPosition);
+  void TTDRawBufferModifyNotifySync(UINT32 index, UINT32 count);
+  static void TTDRawBufferCopyNotify(Local<ArrayBuffer> dst, UINT32 dstindex,
+                                     Local<ArrayBuffer> src, UINT32 srcIndex,
+                                     UINT32 count);
+// #endif
 
   static ArrayBuffer* Cast(Value* obj);
 
@@ -1845,6 +2054,80 @@ class V8_EXPORT Float64Array : public TypedArray {
   Float64Array();
 };
 
+class V8_EXPORT SharedArrayBuffer : public Object {
+public:
+  static SharedArrayBuffer* Cast(Value* obj);
+
+private:
+  SharedArrayBuffer();
+};
+
+class V8_EXPORT ValueSerializer {
+public:
+  class V8_EXPORT Delegate {
+  public:
+    virtual ~Delegate() {}
+
+    virtual void ThrowDataCloneError(Local<String> message) = 0;
+    virtual Maybe<bool> WriteHostObject(Isolate* isolate, Local<Object> object);
+    virtual Maybe<uint32_t> GetSharedArrayBufferId(
+      Isolate* isolate, Local<SharedArrayBuffer> shared_array_buffer);
+    virtual void* ReallocateBufferMemory(void* old_buffer, size_t size,
+      size_t* actual_size);
+    virtual void FreeBufferMemory(void* buffer);
+  };
+
+  explicit ValueSerializer(Isolate* isolate);
+  ValueSerializer(Isolate* isolate, Delegate* delegate);
+  ~ValueSerializer();
+
+  void WriteHeader();
+  V8_WARN_UNUSED_RESULT Maybe<bool> WriteValue(Local<Context> context,
+    Local<Value> value);
+  V8_WARN_UNUSED_RESULT std::pair<uint8_t*, size_t> Release();
+  void TransferArrayBuffer(uint32_t transfer_id,
+    Local<ArrayBuffer> array_buffer);
+  void SetTreatArrayBufferViewsAsHostObjects(bool mode);
+  void WriteUint32(uint32_t value);
+  void WriteUint64(uint64_t value);
+  void WriteDouble(double value);
+  void WriteRawBytes(const void* source, size_t length);
+
+private:
+  ValueSerializer(const ValueSerializer&) = delete;
+  void operator=(const ValueSerializer&) = delete;
+};
+
+class V8_EXPORT ValueDeserializer {
+public:
+  class V8_EXPORT Delegate {
+  public:
+    virtual ~Delegate() {}
+
+    virtual MaybeLocal<Object> ReadHostObject(Isolate* isolate);
+  };
+
+  ValueDeserializer(Isolate* isolate, const uint8_t* data, size_t size,
+    Delegate* delegate);
+  ~ValueDeserializer();
+
+  V8_WARN_UNUSED_RESULT Maybe<bool> ReadHeader(Local<Context> context);
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> ReadValue(Local<Context> context);
+  void TransferArrayBuffer(uint32_t transfer_id,
+    Local<ArrayBuffer> array_buffer);
+  void TransferSharedArrayBuffer(uint32_t id,
+    Local<SharedArrayBuffer> shared_array_buffer);
+  uint32_t GetWireFormatVersion() const;
+  V8_WARN_UNUSED_RESULT bool ReadUint32(uint32_t* value);
+  V8_WARN_UNUSED_RESULT bool ReadUint64(uint64_t* value);
+  V8_WARN_UNUSED_RESULT bool ReadDouble(double* value);
+  V8_WARN_UNUSED_RESULT bool ReadRawBytes(size_t length, const void** data);
+
+private:
+  ValueDeserializer(const ValueDeserializer&) = delete;
+  void operator=(const ValueDeserializer&) = delete;
+};
+
 enum AccessType {
   ACCESS_GET,
   ACCESS_SET,
@@ -1888,6 +2171,7 @@ class V8_EXPORT FunctionTemplate : public Template {
                       Handle<Value> data = Handle<Value>());
   bool HasInstance(Handle<Value> object);
   void Inherit(Handle<FunctionTemplate> parent);
+  void RemovePrototype();
 };
 
 enum class PropertyHandlerFlags {
@@ -2063,6 +2347,18 @@ class V8_EXPORT Exception {
   static Local<Value> Error(Handle<String> message);
 };
 
+class V8_EXPORT MicrotasksScope {
+public:
+    enum Type { kRunMicrotasks, kDoNotRunMicrotasks };
+
+    MicrotasksScope(Isolate* isolate, Type type);
+    ~MicrotasksScope();
+
+    // Prevent copying.
+    MicrotasksScope(const MicrotasksScope&) = delete;
+    MicrotasksScope& operator=(const MicrotasksScope&) = delete;
+};
+
 enum GCType {
   kGCTypeScavenge = 1 << 0,
   kGCTypeMarkSweepCompact = 1 << 1,
@@ -2111,21 +2407,43 @@ class PromiseRejectMessage {
 
 typedef void (*PromiseRejectCallback)(PromiseRejectMessage message);
 
+/**
+* Collection of V8 heap information.
+*
+* Instances of this class can be passed to v8::V8::HeapStatistics to
+* get heap statistics from V8.
+*/
 class V8_EXPORT HeapStatistics {
- private:
-  size_t heapSize;
-
  public:
-  void set_heap_size(size_t heapSize) {
-    this->heapSize = heapSize;
+  HeapStatistics();
+
+  void set_heap_size(size_t heap_size) {
+    total_heap_size_ = heap_size;
   }
 
-  size_t total_heap_size() { return this->heapSize; }
-  size_t total_heap_size_executable() { return 0; }
-  size_t total_physical_size() { return 0; }
-  size_t total_available_size() { return 0; }
-  size_t used_heap_size() { return this->heapSize; }
-  size_t heap_size_limit() { return 0; }
+  size_t total_heap_size() { return total_heap_size_; }
+  size_t total_heap_size_executable() { return total_heap_size_executable_; }
+  size_t total_physical_size() { return total_physical_size_; }
+  size_t total_available_size() { return total_available_size_; }
+  size_t used_heap_size() { return used_heap_size_; }
+  size_t heap_size_limit() { return heap_size_limit_; }
+  size_t malloced_memory() { return malloced_memory_; }
+  size_t peak_malloced_memory() { return peak_malloced_memory_; }
+  size_t does_zap_garbage() { return does_zap_garbage_; }
+
+ private:
+  size_t total_heap_size_;
+  size_t total_heap_size_executable_;
+  size_t total_physical_size_;
+  size_t total_available_size_;
+  size_t used_heap_size_;
+  size_t heap_size_limit_;
+  size_t malloced_memory_;
+  size_t peak_malloced_memory_;
+  bool does_zap_garbage_;
+
+  friend class V8;
+  friend class Isolate;
 };
 
 class V8_EXPORT HeapSpaceStatistics {
@@ -2153,6 +2471,8 @@ typedef int* (*CounterLookupCallback)(const char* name);
 typedef void* (*CreateHistogramCallback)(
   const char* name, int min, int max, size_t buckets);
 typedef void (*AddHistogramSampleCallback)(void* histogram, int sample);
+
+typedef void (*InterruptCallback)(Isolate* isolate, void* data);
 
 class V8_EXPORT Isolate {
  public:
@@ -2187,12 +2507,31 @@ class V8_EXPORT Isolate {
     Scope& operator=(const Scope&);
   };
 
+  class V8_EXPORT DisallowJavascriptExecutionScope {
+   public:
+    enum OnFailure { CRASH_ON_FAILURE, THROW_ON_FAILURE };
+
+    DisallowJavascriptExecutionScope(Isolate* isolate, OnFailure on_failure);
+    ~DisallowJavascriptExecutionScope();
+
+    DisallowJavascriptExecutionScope(const DisallowJavascriptExecutionScope&) =
+        delete;
+    DisallowJavascriptExecutionScope& operator=(
+        const DisallowJavascriptExecutionScope&) = delete;
+  };
+
   enum GarbageCollectionType {
     kFullGarbageCollection,
     kMinorGarbageCollection
   };
 
+  static Isolate* NewWithTTDSupport(const CreateParams& params,
+                                    size_t optReplayUriLength, const char* optReplayUri,
+                                    bool doRecord, bool doReplay, bool doDebug,
+                                    uint32_t snapInterval,
+                                    uint32_t snapHistoryLength);
   static Isolate* New(const CreateParams& params);
+
   static Isolate* New();
   static Isolate* GetCurrent();
   typedef bool(*AbortOnUncaughtExceptionCallback)(Isolate*);
@@ -2210,7 +2549,13 @@ class V8_EXPORT Isolate {
   int64_t AdjustAmountOfExternalAllocatedMemory(int64_t change_in_bytes);
   void SetData(uint32_t slot, void* data);
   void* GetData(uint32_t slot);
+
+  static bool RunSingleStepOfReverseMoveLoop(v8::Isolate* isolate,
+                                             uint64_t* moveMode,
+                                             int64_t* nextEventTime);
+
   static uint32_t GetNumberOfDataSlots();
+  bool InContext();
   Local<Context> GetCurrentContext();
   void SetPromiseRejectCallback(PromiseRejectCallback callback);
   void RunMicrotasks();
@@ -2239,6 +2584,7 @@ class V8_EXPORT Isolate {
   void RemoveGCEpilogueCallback(GCCallback callback);
 
   void CancelTerminateExecution();
+  void RequestInterrupt(InterruptCallback callback, void* data);
   void TerminateExecution();
   void RequestGarbageCollectionForTesting(GarbageCollectionType type);
 
@@ -2252,6 +2598,9 @@ class V8_EXPORT Isolate {
 
   void LowMemoryNotification();
   int ContextDisposedNotification();
+  void SetCaptureStackTraceForUncaughtExceptions(
+      bool capture, int frame_limit = 10,
+      StackTrace::StackTraceOptions options = StackTrace::kOverview);
 };
 
 class V8_EXPORT JitCodeEvent {
@@ -2279,7 +2628,6 @@ class V8_EXPORT StartupData {
 
 class V8_EXPORT V8 {
  public:
-  static void SetArrayBufferAllocator(ArrayBuffer::Allocator* allocator);
   static bool IsDead();
   static void SetFlagsFromString(const char* str, int length);
   static void SetFlagsFromCommandLine(
@@ -2301,6 +2649,13 @@ class Maybe {
  public:
   bool IsNothing() const { return !has_value; }
   bool IsJust() const { return has_value; }
+
+  T ToChecked() const { return FromJust(); }
+
+  bool To(T* out) const {
+    if (V8_LIKELY(IsJust())) *out = value;
+    return IsJust();
+  }
 
   // Will crash if the Maybe<> is nothing.
   T FromJust() const {
@@ -2399,12 +2754,22 @@ class V8_EXPORT Context {
 
   static Local<Context> New(
     Isolate* isolate,
+    bool useGlobalTTState = false,
     ExtensionConfiguration* extensions = NULL,
     Handle<ObjectTemplate> global_template = Handle<ObjectTemplate>(),
     Handle<Value> global_object = Handle<Value>());
+  static Local<Context> New(
+    Isolate* isolate,
+    ExtensionConfiguration* extensions,
+    Handle<ObjectTemplate> global_template = Handle<ObjectTemplate>(),
+    Handle<Value> global_object = Handle<Value>()) {
+    return New(isolate, false, extensions, global_template, global_object);
+  }
   static Local<Context> GetCurrent();
 
   Isolate* GetIsolate();
+
+  enum EmbedderDataFields { kDebugIdIndex = 0 };
   void* GetAlignedPointerFromEmbedderData(int index);
   void SetAlignedPointerInEmbedderData(int index, void* value);
   void SetEmbedderData(int index, Local<Value> value);
@@ -2434,7 +2799,7 @@ Local<T> Local<T>::New(T* that) {
 
 // Context are not javascript values, so we need to specialize them
 template <>
-Local<Context> Local<Context>::New(Context* that) {
+V8_INLINE Local<Context> Local<Context>::New(Context* that) {
   if (!HandleScope::GetCurrent()->AddLocalContext(that)) {
     return Local<Context>();
   }
@@ -2449,6 +2814,12 @@ Local<T> Local<T>::New(Isolate* isolate, Local<T> that) {
 template <class T>
 Local<T> Local<T>::New(Isolate* isolate, const PersistentBase<T>& that) {
   return New(isolate, that.val_);
+}
+
+template <class T>
+Local<T> MaybeLocal<T>::ToLocalChecked() {
+  if (V8_UNLIKELY(val_ == nullptr)) V8::ToLocalEmpty();
+  return Local<T>(val_);
 }
 
 //
@@ -2472,8 +2843,8 @@ void Persistent<T, M>::Copy(const Persistent<S, M2>& that) {
 
   this->val_ = that.val_;
   this->_weakWrapper = that._weakWrapper;
-  if (val_ && !IsWeak()) {
-    JsAddRef(val_, nullptr);
+  if (this->val_ && !this->IsWeak()) {
+    JsAddRef(this->val_, nullptr);
   }
 
   M::Copy(that, this);
@@ -2494,10 +2865,11 @@ void PersistentBase<T>::Reset() {
   if (this->IsEmpty() || V8::IsDead()) return;
 
   if (IsWeak()) {
-    if (_weakWrapper.unique()) {
+    if (_weakWrapper) {
       chakrashim::ClearObjectWeakReferenceCallback(val_, /*revive*/false);
+      delete _weakWrapper;
+      _weakWrapper = nullptr;
     }
-    _weakWrapper.reset();
   } else {
     JsRelease(val_, nullptr);
   }
@@ -2561,10 +2933,11 @@ P* PersistentBase<T>::ClearWeak() {
   if (!IsWeak()) return nullptr;
 
   P* parameters = reinterpret_cast<P*>(_weakWrapper->parameters);
-  if (_weakWrapper.unique()) {
+  if (_weakWrapper) {
     chakrashim::ClearObjectWeakReferenceCallback(val_, /*revive*/true);
+    delete _weakWrapper;
+    _weakWrapper = nullptr;
   }
-  _weakWrapper.reset();
 
   JsAddRef(val_, nullptr);
   return parameters;
@@ -2600,6 +2973,42 @@ inline Local<Context> HandleScope::Close(Handle<Context> value) {
   }
 
   return Local<Context>(*value);
+}
+
+template<typename T>
+void ReturnValue<T>::SetNull() {
+  Set(Null(nullptr));
+}
+
+template<typename T>
+void ReturnValue<T>::SetUndefined() {
+  Set(Undefined(nullptr));
+}
+
+template<typename T>
+void ReturnValue<T>::SetEmptyString() {
+  Set(String::Empty(nullptr));
+}
+
+template<typename T>
+Isolate* ReturnValue<T>::GetIsolate() {
+  return Isolate::GetCurrent();
+}
+
+template<typename T>
+Local<Value> FunctionCallbackInfo<T>::operator[](int i) const {
+  return (i >= 0 && i < _length) ?
+    _args[i] : Undefined(nullptr).As<Value>();
+}
+
+template<typename T>
+Isolate* FunctionCallbackInfo<T>::GetIsolate() const {
+  return Isolate::GetCurrent();
+}
+
+template<typename T>
+Isolate* PropertyCallbackInfo<T>::GetIsolate() const {
+  return Isolate::GetCurrent();
 }
 
 }  // namespace v8

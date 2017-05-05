@@ -28,8 +28,8 @@ module.exports = {
                     {
                         type: "object",
                         properties: {
-                            before: {type: "boolean"},
-                            after: {type: "boolean"}
+                            before: { type: "boolean" },
+                            after: { type: "boolean" }
                         },
                         additionalProperties: false
                     }
@@ -55,21 +55,26 @@ module.exports = {
         const sourceCode = context.getSourceCode();
 
         /**
-         * Gets `*` token from a given node.
+         * Checks if the given token is a star token or not.
          *
-         * @param {ASTNode} node - A node to get `*` token. This is one of
-         *      FunctionDeclaration, FunctionExpression, Property, and
-         *      MethodDefinition.
-         * @returns {Token} `*` token.
+         * @param {Token} token - The token to check.
+         * @returns {boolean} `true` if the token is a star token.
+         */
+        function isStarToken(token) {
+            return token.value === "*" && token.type === "Punctuator";
+        }
+
+        /**
+         * Gets the generator star token of the given function node.
+         *
+         * @param {ASTNode} node - The function node to get.
+         * @returns {Token} Found star token.
          */
         function getStarToken(node) {
-            let token = sourceCode.getFirstToken(node);
-
-            while (token.value !== "*") {
-                token = sourceCode.getTokenAfter(token);
-            }
-
-            return token;
+            return sourceCode.getFirstToken(
+                (node.parent.method || node.parent.type === "MethodDefinition") ? node.parent : node,
+                isStarToken
+            );
         }
 
         /**
@@ -87,11 +92,16 @@ module.exports = {
                 const spaceRequired = mode[side];
                 const node = after ? leftToken : rightToken;
                 const type = spaceRequired ? "Missing" : "Unexpected";
-                const message = type + " space " + side + " *.";
+                const message = "{{type}} space {{side}} *.";
+                const data = {
+                    type,
+                    side
+                };
 
                 context.report({
                     node,
                     message,
+                    data,
                     fix(fixer) {
                         if (spaceRequired) {
                             if (after) {
@@ -111,17 +121,11 @@ module.exports = {
          * @returns {void}
          */
         function checkFunction(node) {
-            let starToken;
-
             if (!node.generator) {
                 return;
             }
 
-            if (node.parent.method || node.parent.type === "MethodDefinition") {
-                starToken = getStarToken(node.parent);
-            } else {
-                starToken = getStarToken(node);
-            }
+            const starToken = getStarToken(node);
 
             // Only check before when preceded by `function`|`static` keyword
             const prevToken = sourceCode.getTokenBefore(starToken);

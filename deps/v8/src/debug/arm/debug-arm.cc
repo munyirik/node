@@ -4,8 +4,10 @@
 
 #if V8_TARGET_ARCH_ARM
 
-#include "src/codegen.h"
 #include "src/debug/debug.h"
+
+#include "src/codegen.h"
+#include "src/debug/liveedit.h"
 
 namespace v8 {
 namespace internal {
@@ -41,7 +43,7 @@ void DebugCodegen::ClearDebugBreakSlot(Isolate* isolate, Address pc) {
 
 void DebugCodegen::PatchDebugBreakSlot(Isolate* isolate, Address pc,
                                        Handle<Code> code) {
-  DCHECK_EQ(Code::BUILTIN, code->kind());
+  DCHECK(code->is_debug_stub());
   CodePatcher patcher(isolate, pc, Assembler::kDebugBreakSlotInstructions);
   // Patch the code changing the debug break slot code from
   //   mov r2, r2
@@ -134,7 +136,7 @@ void DebugCodegen::GenerateFrameDropperLiveEdit(MacroAssembler* masm) {
   __ LeaveFrame(StackFrame::INTERNAL);
 
   ParameterCount dummy(0);
-  __ FloodFunctionIfStepping(r1, no_reg, dummy, dummy);
+  __ CheckDebugHook(r1, no_reg, dummy, dummy);
 
   { ConstantPoolUnavailableScope constant_pool_unavailable(masm);
     // Load context from the function.

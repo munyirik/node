@@ -26,17 +26,6 @@ Build Command for node.dll - Node.js (Chakra) for UWP
 vcbuild chakra uwp-dll nosign [x86|x64|arm]
 ```
 
-Build Command for node.exe - Node.js (Chakra)
-```batch
-vcbuild chakra nosign [x86|x64|arm]
-```
-
-### How to test node.exe
-
-```batch
-vcbuild chakra nobuild test [x86|x64|arm]
-```
-
 ### How to test node.dll
 
 See [this](https://github.com/ms-iot/node-uwp-wrapper#testing)

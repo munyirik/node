@@ -14,32 +14,35 @@ if /i "%1"=="/?" goto help
 @rem Process arguments.
 set config=Release
 set target=Build
-set target_arch=x86
+set target_arch=x64
 set target_env=
 set noprojgen=
 set nobuild=
-set nosign=
+set sign=
 set nosnapshot=
+set cctest_args=
 set test_args=
 set package=
 set msi=
 set upload=
 set licensertf=
 set jslint=
-set buildnodeweak=
+set cpplint=
+set build_testgc_addon=
 set noetw=
 set noetw_msi_arg=
 set noperfctr=
 set noperfctr_msi_arg=
 set i18n_arg=
 set download_arg=
-set release_urls_arg=
 set build_release=
 set enable_vtune_arg=
 set configure_flags=
 set build_addons=
 set dll=
-set engine=v8
+set build_addons_napi=
+set test_node_inspect=
+set engine=chakracore
 
 :next-arg
 if "%1"=="" goto args-done
@@ -50,30 +53,36 @@ if /i "%1"=="ia32"          set target_arch=x86&goto arg-ok
 if /i "%1"=="x86"           set target_arch=x86&goto arg-ok
 if /i "%1"=="x64"           set target_arch=x64&goto arg-ok
 if /i "%1"=="arm"           set target_arch=arm&goto arg-ok
-if /i "%1"=="vc2013"        set target_env=vc2013&goto arg-ok
 if /i "%1"=="vc2015"        set target_env=vc2015&goto arg-ok
 if /i "%1"=="noprojgen"     set noprojgen=1&goto arg-ok
 if /i "%1"=="nobuild"       set nobuild=1&goto arg-ok
-if /i "%1"=="nosign"        set nosign=1&goto arg-ok
+if /i "%1"=="nosign"        set "sign="&echo Note: vcbuild no longer signs by default. "nosign" is redundant.&goto arg-ok
+if /i "%1"=="sign"          set sign=1&goto arg-ok
 if /i "%1"=="nosnapshot"    set nosnapshot=1&goto arg-ok
 if /i "%1"=="noetw"         set noetw=1&goto arg-ok
 if /i "%1"=="noperfctr"     set noperfctr=1&goto arg-ok
 if /i "%1"=="licensertf"    set licensertf=1&goto arg-ok
-if /i "%1"=="test"          set test_args=%test_args% addons doctool known_issues message parallel sequential -J&set jslint=1&set build_addons=1&goto arg-ok
-if /i "%1"=="test-ci"       set test_args=%test_args% %test_ci_args% -p tap --logfile test.tap addons doctool known_issues message sequential parallel&set build_addons=1&goto arg-ok
+if /i "%1"=="test"          set test_args=%test_args% addons addons-napi doctool known_issues message parallel sequential -J&set cpplint=1&set jslint=1&set build_addons=1&set build_addons_napi=1&goto arg-ok
+if /i "%1"=="test-ci"       set test_args=%test_args% %test_ci_args% -p tap --logfile test.tap addons addons-napi doctool inspector known_issues message sequential parallel&set cctest_args=%cctest_args% --gtest_output=tap:cctest.tap&set build_addons=1&set build_addons_napi=1&goto arg-ok
 if /i "%1"=="test-addons"   set test_args=%test_args% addons&set build_addons=1&goto arg-ok
+if /i "%1"=="test-addons-napi"   set test_args=%test_args% addons-napi&set build_addons_napi=1&goto arg-ok
 if /i "%1"=="test-simple"   set test_args=%test_args% sequential parallel -J&goto arg-ok
 if /i "%1"=="test-message"  set test_args=%test_args% message&goto arg-ok
-if /i "%1"=="test-gc"       set test_args=%test_args% gc&set buildnodeweak=1&goto arg-ok
+if /i "%1"=="test-gc"       set test_args=%test_args% gc&set build_testgc_addon=1&goto arg-ok
+if /i "%1"=="test-inspector" set test_args=%test_args% inspector&goto arg-ok
+if /i "%1"=="test-tick-processor" set test_args=%test_args% tick-processor&goto arg-ok
 if /i "%1"=="test-internet" set test_args=%test_args% internet&goto arg-ok
 if /i "%1"=="test-pummel"   set test_args=%test_args% pummel&goto arg-ok
-if /i "%1"=="test-all"      set test_args=%test_args% sequential parallel message gc internet pummel&set buildnodeweak=1&set jslint=1&goto arg-ok
+if /i "%1"=="test-all"      set test_args=%test_args% sequential parallel message gc inspector internet pummel&set build_testgc_addon=1&set cpplint=1&set jslint=1&goto arg-ok
 if /i "%1"=="test-known-issues" set test_args=%test_args% known_issues&goto arg-ok
+if /i "%1"=="test-node-inspect" set test_node_inspect=1&goto arg-ok
 if /i "%1"=="jslint"        set jslint=1&goto arg-ok
 if /i "%1"=="jslint-ci"     set jslint_ci=1&goto arg-ok
+if /i "%1"=="lint"          set cpplint=1&set jslint=1&goto arg-ok
+if /i "%1"=="lint-ci"       set cpplint=1&set jslint_ci=1&goto arg-ok
 if /i "%1"=="package"       set package=1&goto arg-ok
 if /i "%1"=="msi"           set msi=1&set licensertf=1&set download_arg="--download=all"&set i18n_arg=small-icu&goto arg-ok
-if /i "%1"=="build-release" set build_release=1&goto arg-ok
+if /i "%1"=="build-release" set build_release=1&set sign=1&goto arg-ok
 if /i "%1"=="upload"        set upload=1&goto arg-ok
 if /i "%1"=="small-icu"     set i18n_arg=%1&goto arg-ok
 if /i "%1"=="full-icu"      set i18n_arg=%1&goto arg-ok
@@ -88,7 +97,8 @@ if /i "%1"=="chakra"        set engine=chakra&set chakra_jslint=deps\chakrashim\
 if /i "%1"=="sdk"           set sdk=1&goto arg-ok
 if /i "%1"=="uwp-dll"       set target_type=uwp-dll&goto arg-ok
 
-echo Warning: ignoring invalid command line option `%1`.
+echo Error: invalid command line option `%1`.
+exit /b 1
 
 :arg-ok
 :arg-ok
@@ -100,7 +110,7 @@ goto next-arg
 if defined build_release (
   set config=Release
   set package=1
-  set msi=1
+  set "msi="
   set licensertf=1
   set download_arg="--download=all"
   set i18n_arg=small-icu
@@ -123,13 +133,14 @@ if defined sdk (
 )
 
 :: assign path to node_exe
-set "node_exe=%config%\node.exe"
+set "node_exe=%~dp0%config%\node.exe"
+if not defined native_node_exe set "native_node_exe=%node_exe%"
 
 if "%config%"=="Debug" set configure_flags=%configure_flags% --debug
 if defined nosnapshot set configure_flags=%configure_flags% --without-snapshot
 if defined noetw set configure_flags=%configure_flags% --without-etw& set noetw_msi_arg=/p:NoETW=1
 if defined noperfctr set configure_flags=%configure_flags% --without-perfctr& set noperfctr_msi_arg=/p:NoPerfCtr=1
-if defined release_urlbase set release_urlbase_arg=--release-urlbase=%release_urlbase%
+if defined release_urlbase set configure_flags=%configure_flags% --release-urlbase=%release_urlbase%
 if defined download_arg set configure_flags=%configure_flags% %download_arg%
 if defined enable_vtune_arg set configure_flags=%configure_flags% --enable-vtune-profiling
 if defined dll set configure_flags=%configure_flags% --shared
@@ -138,7 +149,8 @@ if "%i18n_arg%"=="full-icu" set configure_flags=%configure_flags% --with-intl=fu
 if "%i18n_arg%"=="small-icu" set configure_flags=%configure_flags% --with-intl=small-icu
 if "%i18n_arg%"=="intl-none" set configure_flags=%configure_flags% --with-intl=none
 if "%i18n_arg%"=="without-intl" set configure_flags=%configure_flags% --without-intl
-if "%engine%"=="chakra" set configure_flags=%configure_flags% --without-intl --without-inspector --without-v8-platform --without-bundled-v8 --without-perfctr
+
+if "%engine%"=="chakra" set configure_flags=%configure_flags% --without-intl --without-bundled-v8
 if "%target_type%"=="uwp-dll" (
   set target_type_arg=--uwp-dll
 )
@@ -159,53 +171,30 @@ call :getnodeversion || exit /b 1
 
 if "%target%"=="Clean" rmdir /Q /S "%~dp0%config%\node-v%FULLVERSION%-win-%target_arch%" > nul 2> nul
 
+if defined noprojgen if defined nobuild if not defined sign if not defined msi goto licensertf
+
 @rem Set environment for msbuild
 
-if defined target_env if "%target_env%" NEQ "vc2015" goto vc-set-2013
 @rem Look for Visual Studio 2015
 echo Looking for Visual Studio 2015
-if not defined VS140COMNTOOLS goto vc-set-2013
-if not exist "%VS140COMNTOOLS%\..\..\vc\vcvarsall.bat" goto vc-set-2013
+if not defined VS140COMNTOOLS goto msbuild-not-found
+if not exist "%VS140COMNTOOLS%\..\..\vc\vcvarsall.bat" goto msbuild-not-found
 echo Found Visual Studio 2015
 if defined msi (
   echo Looking for WiX installation for Visual Studio 2015...
   if not exist "%WIX%\SDK\VS2015" (
     echo Failed to find WiX install for Visual Studio 2015
     echo VS2015 support for WiX is only present starting at version 3.10
-    goto vc-set-2013
+    goto wix-not-found
   )
 )
 if "%VCVARS_VER%" NEQ "140" (
   call "%VS140COMNTOOLS%\..\..\vc\vcvarsall.bat"
   SET VCVARS_VER=140
 )
-if not defined VCINSTALLDIR goto vc-set-2013
+if not defined VCINSTALLDIR goto msbuild-not-found
 set GYP_MSVS_VERSION=2015
 set PLATFORM_TOOLSET=v140
-goto msbuild-found
-
-:vc-set-2013
-if defined target_env if "%target_env%" NEQ "vc2013" goto msbuild-not-found
-@rem Look for Visual Studio 2013
-echo Looking for Visual Studio 2013
-if not defined VS120COMNTOOLS goto msbuild-not-found
-if not exist "%VS120COMNTOOLS%\..\..\vc\vcvarsall.bat" goto msbuild-not-found
-echo Found Visual Studio 2013
-if defined msi (
-  echo Looking for WiX installation for Visual Studio 2013...
-  if not exist "%WIX%\SDK\VS2013" (
-    echo Failed to find WiX install for Visual Studio 2013
-    echo VS2013 support for WiX is only present starting at version 3.8
-    goto wix-not-found
-  )
-)
-if "%VCVARS_VER%" NEQ "120" (
-  call "%VS120COMNTOOLS%\..\..\vc\vcvarsall.bat"
-  SET VCVARS_VER=120
-)
-if not defined VCINSTALLDIR goto msbuild-not-found
-set GYP_MSVS_VERSION=2013
-set PLATFORM_TOOLSET=v120
 goto msbuild-found
 
 :msbuild-not-found
@@ -251,17 +240,17 @@ robocopy "%~dp0%config%" "%~dp0%config%\sdk\%sdk_target_arch%" node.lib
 if errorlevel 8 echo Failed to save libs&goto exit
 
 :sign
-@rem Skip signing if the `nosign` option was specified.
-if defined nosign goto licensertf
+@rem Skip signing unless the `sign` option was specified.
+if not defined sign goto licensertf
 
-signtool sign /a /d "Node.js" /du "https://nodejs.org" /t http://timestamp.globalsign.com/scripts/timestamp.dll Release\node.exe
+call tools\sign.bat Release\node.exe
 if errorlevel 1 echo Failed to sign exe&goto exit
 
 :licensertf
 @rem Skip license.rtf generation if not requested.
 if not defined licensertf goto package
 
-%config%\node tools\license2rtf.js < LICENSE > %config%\license.rtf
+%native_node_exe% tools\license2rtf.js < LICENSE > %config%\license.rtf
 if errorlevel 1 echo Failed to generate license.rtf&goto exit
 
 :package
@@ -273,6 +262,8 @@ mkdir node-v%FULLVERSION%-win-%target_arch%\node_modules > nul 2>nul
 
 copy /Y node.exe node-v%FULLVERSION%-win-%target_arch%\ > nul
 if errorlevel 1 echo Cannot copy node.exe && goto package_error
+copy /Y chakracore.dll node-v%FULLVERSION%-win-%target_arch%\ > nul
+if errorlevel 1 echo Cannot copy chakracore.dll && goto package_error
 copy /Y ..\LICENSE node-v%FULLVERSION%-win-%target_arch%\ > nul
 if errorlevel 1 echo Cannot copy LICENSE && goto package_error
 copy /Y ..\README.md node-v%FULLVERSION%-win-%target_arch%\ > nul
@@ -296,6 +287,21 @@ if not defined noperfctr (
     if errorlevel 1 echo Cannot copy node_perfctr_provider.man && goto package_error
 )
 
+:: ChakraCore SDK for native modules
+robocopy ..\ node-v%FULLVERSION%-win-%target_arch%\sdk\ *.h *.inc common.gypi /XD debug release build icu core test genfiles /S > nul
+if errorlevel 8 echo Cannot copy SDK contents && goto package_error
+mkdir node-v%FULLVERSION%-win-%target_arch%\sdk\%config% > nul 2> nul
+copy /Y node.lib node-v%FULLVERSION%-win-%target_arch%\sdk\%config%\ > nul
+if errorlevel 1 echo Cannot copy node.lib && goto package_error
+copy /Y chakracore.lib node-v%FULLVERSION%-win-%target_arch%\sdk\%config%\ > nul
+if errorlevel 1 echo Cannot copy chakracore.lib && goto package_error
+set "pkgnpmsh=node-v%FULLVERSION%-win-%target_arch%/npm"
+%native_node_exe% -e "var data=fs.readFileSync('%pkgnpmsh%', 'utf8').split('\n');data.splice(-2, 0, 'export NPM_CONFIG_NODEDIR=\"$basedir/sdk\"');fs.writeFileSync('%pkgnpmsh%', data.join('\n'))"
+if errorlevel 1 echo Cannot change %pkgnpmsh% && goto package_error
+set "pkgnpmcmd=node-v%FULLVERSION%-win-%target_arch%/npm.cmd"
+%native_node_exe% -e "var data=fs.readFileSync('%pkgnpmcmd%', 'utf8').split('\n');data.splice(-2, 0, 'SET \"NPM_CONFIG_NODEDIR=%%~dp0\\sdk\"');fs.writeFileSync('%pkgnpmcmd%', data.join('\n'))"
+if errorlevel 1 echo Cannot change %pkgnpmcmd% && goto package_error
+
 echo Creating node-v%FULLVERSION%-win-%target_arch%.7z
 del node-v%FULLVERSION%-win-%target_arch%.7z > nul 2> nul
 7z a -r -mx9 -t7z node-v%FULLVERSION%-win-%target_arch%.7z node-v%FULLVERSION%-win-%target_arch% > nul
@@ -308,11 +314,11 @@ if errorlevel 1 echo Cannot create node-v%FULLVERSION%-win-%target_arch%.zip && 
 
 echo Creating node_pdb.7z
 del node_pdb.7z > nul 2> nul
-7z a -mx9 -t7z node_pdb.7z node.pdb > nul
+7z a -mx9 -t7z node_pdb.7z node.pdb chakracore.pdb > nul
 
 echo Creating node_pdb.zip
 del node_pdb.zip  > nul 2> nul
-7z a -mx9 -tzip node_pdb.zip node.pdb > nul
+7z a -mx9 -tzip node_pdb.zip node.pdb chakracore.pdb > nul
 
 cd ..
 echo Package created!
@@ -324,7 +330,7 @@ exit /b 1
 
 :msi
 @rem Skip msi generation if not requested
-if not defined msi goto run
+if not defined msi goto upload
 
 :msibuild
 if defined NODE_VERSION_TAG (
@@ -345,8 +351,8 @@ echo Building %NODE_MSIOUTPUT%
 msbuild "%~dp0tools\msvs\msi\nodemsi.sln" /m /t:Clean,Build /p:PlatformToolset=%PLATFORM_TOOLSET% /p:GypMsvsVersion=%GYP_MSVS_VERSION% /p:Configuration=%config% /p:Platform=%target_arch% /p:SdkTargetArch=%sdk_target_arch% /p:NodeMsiOutput="%NODE_MSIOUTPUT%" /p:NodeEngine=%engine% /p:NodeName="%NODE_NAME%" /p:NodeShortName="%NODE_SHORTNAME%" /p:NodeUseSdk=%sdk% /p:NodeFullVersion=%NODE_FULL_VERSION% /p:NodeVersion=%NODE_VERSION% /p:FullVersion=%FULLVERSION% /p:DistTypeDir=%DISTTYPEDIR% %noetw_msi_arg% %noperfctr_msi_arg% /clp:NoSummary;NoItemAndPropertyList;Verbosity=minimal /nologo
 if errorlevel 1 goto exit
 
-if defined nosign goto upload
-signtool sign /a /d "Node.js" /du "https://nodejs.org" /t http://timestamp.globalsign.com/scripts/timestamp.dll node-v%FULLVERSION%-%target_arch%.msi
+if not defined sign goto upload
+call tools\sign.bat node-v%FULLVERSION%-%target_arch%.msi
 if errorlevel 1 echo Failed to sign msi&goto exit
 
 :upload
@@ -365,61 +371,128 @@ scp -F %SSHCONFIG% Release\node_pdb.zip %STAGINGSERVER%:nodejs/%DISTTYPEDIR%/v%F
 scp -F %SSHCONFIG% Release\node_pdb.7z %STAGINGSERVER%:nodejs/%DISTTYPEDIR%/v%FULLVERSION%/win-%target_arch%/node_pdb.7z
 scp -F %SSHCONFIG% Release\node-v%FULLVERSION%-win-%target_arch%.7z %STAGINGSERVER%:nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.7z
 scp -F %SSHCONFIG% Release\node-v%FULLVERSION%-win-%target_arch%.zip %STAGINGSERVER%:nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.zip
-scp -F %SSHCONFIG% node-v%FULLVERSION%-%target_arch%.msi %STAGINGSERVER%:nodejs/%DISTTYPEDIR%/v%FULLVERSION%/
-ssh -F %SSHCONFIG% %STAGINGSERVER% "touch nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-%target_arch%.msi.done nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.zip.done nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.7z.done nodejs/%DISTTYPEDIR%/v%FULLVERSION%/win-%target_arch%.done && chmod -R ug=rw-x+X,o=r+X nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-%target_arch%.* nodejs/%DISTTYPEDIR%/v%FULLVERSION%/win-%target_arch%*"
+ssh -F %SSHCONFIG% %STAGINGSERVER% "touch nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.zip.done nodejs/%DISTTYPEDIR%/v%FULLVERSION%/node-v%FULLVERSION%-win-%target_arch%.7z.done nodejs/%DISTTYPEDIR%/v%FULLVERSION%/win-%target_arch%.done && chmod -R ug=rw-x+X,o=r+X nodejs/%DISTTYPEDIR%/v%FULLVERSION%/win-%target_arch%*"
 
 :run
 @rem Run tests if requested.
 
-:build-node-weak
-@rem Build node-weak if required
-if "%buildnodeweak%"=="" goto build-addons
-"%config%\node" deps\npm\node_modules\node-gyp\bin\node-gyp rebuild --directory="%~dp0test\gc\node_modules\weak" --nodedir="%~dp0."
-if errorlevel 1 goto build-node-weak-failed
+@rem Build test/gc add-on if required.
+if "%build_testgc_addon%"=="" goto build-addons
+"%config%\node" deps\npm\node_modules\node-gyp\bin\node-gyp rebuild --directory="%~dp0test\gc" --nodedir="%~dp0."
+if errorlevel 1 goto build-testgc-addon-failed
 goto build-addons
 
-:build-node-weak-failed
-echo Failed to build node-weak.
+:build-testgc-addon-failed
+echo Failed to build test/gc add-on."
 goto exit
 
 :build-addons
-if not defined build_addons goto run-tests
+if not defined build_addons goto build-addons-napi
 if not exist "%node_exe%" (
   echo Failed to find node.exe
-  goto run-tests
+  goto build-addons-napi
 )
-echo Building add-ons
+echo Building addons
 :: clear
 for /d %%F in (test\addons\??_*) do (
   rd /s /q %%F
 )
 :: generate
 "%node_exe%" tools\doc\addon-verify.js
+if %errorlevel% neq 0 exit /b %errorlevel%
 :: building addons
+setlocal EnableDelayedExpansion
 for /d %%F in (test\addons\*) do (
   "%node_exe%" deps\npm\node_modules\node-gyp\bin\node-gyp rebuild ^
     --directory="%%F" ^
     --nodedir="%cd%"
+  if !errorlevel! neq 0 exit /b !errorlevel!
 )
+
+:build-addons-napi
+if not defined build_addons_napi goto run-tests
+if not exist "%node_exe%" (
+  echo Failed to find node.exe
+  goto run-tests
+)
+echo Building addons-napi
+:: clear
+for /d %%F in (test\addons-napi\??_*) do (
+  rd /s /q %%F
+)
+:: building addons-napi
+for /d %%F in (test\addons-napi\*) do (
+  "%node_exe%" deps\npm\node_modules\node-gyp\bin\node-gyp rebuild ^
+    --directory="%%F" ^
+    --nodedir="%cd%"
+)
+endlocal
 goto run-tests
 
 :run-tests
-if "%test_args%"=="" goto jslint
+if not defined test_node_inspect goto node-tests
+set USE_EMBEDDED_NODE_INSPECT=1
+%config%\node tools\test-npm-package.js --install deps\node-inspect test
+goto node-tests
+
+:node-tests
+if "%test_args%"=="" goto cpplint
 if "%config%"=="Debug" set test_args=--mode=debug %test_args%
 if "%config%"=="Release" set test_args=--mode=release %test_args%
-set test_args=--engine %engine% %test_args%
-echo running 'cctest'
-"%config%\cctest"
+echo running 'cctest %cctest_args%'
+"%config%\cctest" %cctest_args%
 echo running 'python tools\test.py %test_args%'
 python tools\test.py %test_args%
+goto cpplint
+
+:cpplint
+if not defined cpplint goto jslint
+echo running cpplint
+set cppfilelist=
+setlocal enabledelayedexpansion
+for /f "tokens=*" %%G in ('dir /b /s /a src\*.c src\*.cc src\*.h ^
+test\addons\*.cc test\addons\*.h test\cctest\*.cc test\cctest\*.h ^
+test\gc\binding.cc tools\icu\*.cc tools\icu\*.h') do (
+  set relpath=%%G
+  set relpath=!relpath:*%~dp0=!
+  call :add-to-list !relpath!
+)
+( endlocal
+  set cppfilelist=%localcppfilelist%
+)
+python tools/cpplint.py %cppfilelist%
+python tools/check-imports.py
 goto jslint
+
+:add-to-list
+echo %1 | findstr /c:"src\node_root_certs.h"
+if %errorlevel% equ 0 goto exit
+
+echo %1 | findstr /c:"src\queue.h"
+if %errorlevel% equ 0 goto exit
+
+echo %1 | findstr /c:"src\tree.h"
+if %errorlevel% equ 0 goto exit
+
+@rem skip subfolders under /src
+echo %1 | findstr /r /c:"src\\.*\\.*"
+if %errorlevel% equ 0 goto exit
+
+echo %1 | findstr /r /c:"test\\addons\\[0-9].*_.*\.h"
+if %errorlevel% equ 0 goto exit
+
+echo %1 | findstr /r /c:"test\\addons\\[0-9].*_.*\.cc"
+if %errorlevel% equ 0 goto exit
+
+set "localcppfilelist=%localcppfilelist% %1"
+goto exit
 
 :jslint
 if defined jslint_ci goto jslint-ci
 if not defined jslint goto exit
 if not exist tools\eslint\lib\eslint.js goto no-lint
 echo running jslint
-%config%\node tools\eslint\bin\eslint.js --cache --rulesdir=tools\eslint-rules benchmark lib test %chakra_jslint% tools
+%config%\node tools\eslint\bin\eslint.js --cache --rule "linebreak-style: 0" --rulesdir=tools\eslint-rules benchmark lib test %chakra_jslint% tools
 goto exit
 
 :jslint-ci
@@ -437,7 +510,7 @@ echo Failed to create vc project files.
 goto exit
 
 :help
-echo vcbuild.bat [debug/release] [msi] [test-all/test-uv/test-internet/test-pummel/test-simple/test-message] [clean] [noprojgen] [small-icu/full-icu/without-intl] [nobuild] [nosign] [x86/x64] [vc2013/vc2015] [download-all] [enable-vtune]
+echo vcbuild.bat [debug/release] [msi] [test-all/test-uv/test-inspector/test-internet/test-pummel/test-simple/test-message] [clean] [noprojgen] [small-icu/full-icu/without-intl] [nobuild] [sign] [x86/x64] [vc2015] [download-all] [enable-vtune] [lint/lint-ci]
 echo Examples:
 echo   vcbuild.bat                : builds release build
 echo   vcbuild.bat debug          : builds debug build

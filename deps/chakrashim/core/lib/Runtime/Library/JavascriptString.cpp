@@ -8,19 +8,34 @@
 #include "Library/EngineInterfaceObject.h"
 #include "Library/IntlEngineInterfaceExtensionObject.h"
 
+#if ENABLE_NATIVE_CODEGEN
+#include "../Backend/JITRecyclableObject.h"
+#endif
+
 namespace Js
 {
-    // White Space characters are defined in ES6 Section 11.2
-    // There are 26 white space characters we need to correctly class:
-    //0x0009
-    //0x000a
-    //0x000b
-    //0x000c
-    //0x000d
-    //0x0020
-    //0x00a0
+    // White Space characters are defined in ES 2017 Section 11.2 #sec-white-space
+    // There are 25 white space characters we need to correctly class.
+    // - 6 of these are explicitly specified in ES 2017 Section 11.2 #sec-white-space
+    // - 15 of these are Unicode category "Zs" ("Space_Separator") and not explicitly specified above.
+    //   - Note: In total, 17 of these are Unicode category "Zs".
+    // - 4 of these are actually LineTerminator characters.
+    //   - Note: for various reasons it is convenient to group LineTerminator with Whitespace
+    //     in the definition of IsWhiteSpaceCharacter.
+    //     This does not cause problems because of the syntactic nature of LineTerminators
+    //     and their meaning of ending a line in RegExp.
+    //   - See: #sec-string.prototype.trim "The definition of white space is the union of WhiteSpace and LineTerminator."
+    // Note: ES intentionally excludes characters which have Unicode property "White_Space" but which are not "Zs".
+    // See http://www.unicode.org/Public/9.0.0/ucd/UnicodeData.txt for character classes.
+    // The 25 white space characters are:
+    //0x0009 // <TAB>
+    //0x000a // <LF> LineTerminator (LINE FEED)
+    //0x000b // <VT>
+    //0x000c // <FF>
+    //0x000d // <CR> LineTerminator (CARRIAGE RETURN)
+    //0x0020 // <SP>
+    //0x00a0 // <NBSP>
     //0x1680
-    //0x180e
     //0x2000
     //0x2001
     //0x2002
@@ -32,18 +47,18 @@ namespace Js
     //0x2008
     //0x2009
     //0x200a
-    //0x2028
-    //0x2029
+    //0x2028 // <LS> LineTerminator (LINE SEPARATOR)
+    //0x2029 // <PS> LineTerminator (PARAGRAPH SEPARATOR)
     //0x202f
     //0x205f
     //0x3000
-    //0xfeff
+    //0xfeff // <ZWNBSP>
     bool IsWhiteSpaceCharacter(char16 ch)
     {
         return ch >= 0x9 &&
             (ch <= 0xd ||
                 (ch <= 0x200a &&
-                    (ch >= 0x2000 || ch == 0x20 || ch == 0xa0 || ch == 0x1680 || ch == 0x180e)
+                    (ch >= 0x2000 || ch == 0x20 || ch == 0xa0 || ch == 0x1680)
                 ) ||
                 (ch >= 0x2028 &&
                     (ch <= 0x2029 || ch == 0x202f || ch == 0x205f || ch == 0x3000 || ch == 0xfeff)
@@ -178,16 +193,16 @@ namespace Js
     }
 
     JavascriptString::JavascriptString(StaticType * type)
-        : RecyclableObject(type), m_charLength(0), m_pszValue(0)
+        : RecyclableObject(type), m_charLength(0), m_pszValue(nullptr)
     {
         Assert(type->GetTypeId() == TypeIds_String);
     }
 
     JavascriptString::JavascriptString(StaticType * type, charcount_t charLength, const char16* szValue)
-        : RecyclableObject(type), m_charLength(charLength), m_pszValue(szValue)
+        : RecyclableObject(type), m_pszValue(szValue)
     {
         Assert(type->GetTypeId() == TypeIds_String);
-        AssertMsg(IsValidCharCount(charLength), "String length is out of range");
+        SetLength(charLength);
     }
 
     _Ret_range_(m_charLength, m_charLength)
@@ -388,7 +403,7 @@ case_2:
         }
     }
 
-    inline JavascriptString* JavascriptString::ConcatDestructive(JavascriptString* pstRight)
+    JavascriptString* JavascriptString::ConcatDestructive(JavascriptString* pstRight)
     {
         Assert(pstRight);
 
@@ -544,7 +559,7 @@ case_2:
         return cs;
     }
 
-    inline JavascriptString* JavascriptString::Concat(JavascriptString* pstLeft, JavascriptString* pstRight)
+    JavascriptString* JavascriptString::Concat(JavascriptString* pstLeft, JavascriptString* pstRight)
     {
         AssertMsg(pstLeft != nullptr, "Must have a valid left string");
         AssertMsg(pstRight != nullptr, "Must have a valid right string");
@@ -1110,19 +1125,12 @@ case_2:
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
+        // ES #sec-string.prototype.lastindexof
+        // 21.1.3.9  String.prototype.lastIndexOf(searchString[, position])
         //
-        // 1.  Call CheckObjectCoercible passing the this value as its argument.
-        // 2.  Let S be the result of calling ToString, giving it the this value as its argument.
-        // 3.  Let searchStr be ToString(searchString).
-        // 4.  Let numPos be ToNumber(position). (If position is undefined, this step produces the value NaN).
-        // 5.  If numPos is NaN, let pos be +?; otherwise, let pos be ToInteger(numPos).
-        // 6.  Let len be the number of characters in S.
-        // 7.  Let start min(max(pos, 0), len).
-        // 8.  Let searchLen be the number of characters in searchStr.
-        // 9.  Return the largest possible nonnegative integer k not larger than start such that k+ searchLen is not greater than len, and for all nonnegative integers j less than searchLen, the character at position k+j of S is the same as the character at position j of searchStr; but if there is no such integer k, then return the value -1.
-        // NOTE
-        // The lastIndexOf function is intentionally generic; it does not require that its this value be a String object. Therefore, it can be transferred to other kinds of objects for use as a method.
-        //
+        // 1. Let O be ? RequireObjectCoercible(this value).
+        // 2. Let S be ? ToString(O).
+        // 3. Let searchStr be ? ToString(searchString).
 
         JavascriptString * pThis = nullptr;
         GetThisStringArgument(args, scriptContext, _u("String.prototype.lastIndexOf"), &pThis);
@@ -1145,83 +1153,98 @@ case_2:
             searchArg = scriptContext->GetLibrary()->GetUndefinedDisplayString();
         }
 
-        char16 const * const inputStr = pThis->GetString();
+        const char16* const inputStr = pThis->GetString();
         const char16 * const searchStr = searchArg->GetString();
-        const int len = pThis->GetLength();
-        int position = len;
-        int const searchLen = searchArg->GetLength();
+
+        // 4. Let numPos be ? ToNumber(position). (If position is undefined, this step produces the value NaN.)
+        // 5. If numPos is NaN, let pos be +infinity; otherwise, let pos be ToInteger(numPos).
+        // 6. Let len be the number of elements in S.
+        // 7. Let start be min(max(pos, 0), len).
+
+        const charcount_t inputLen = pThis->GetLength();
+        const charcount_t searchLen = searchArg->GetLength();
+        charcount_t position = inputLen;
+        const char16* const searchLowerBound = inputStr;
 
         // Determine if the main string can't contain the search string by length
-        if ( searchLen > len )
+        if (searchLen > inputLen)
         {
             return JavascriptNumber::ToVar(-1, scriptContext);
         }
 
-        if(args.Info.Count > 2)
+        if (args.Info.Count > 2)
         {
             double pos = JavascriptConversion::ToNumber(args[2], scriptContext);
             if (!JavascriptNumber::IsNan(pos))
             {
                 pos = JavascriptConversion::ToInteger(pos);
-                position = (int)min(max(pos, (double)0), (double)len); // adjust position within string limits
+                if (pos > inputLen - searchLen)
+                {
+                    // No point searching beyond the possible end point.
+                    pos = inputLen - searchLen;
+                }
+                position = (charcount_t)min(max(pos, (double)0), (double)inputLen); // adjust position within string limits
             }
         }
 
-        int result = -1;
+        if (position > inputLen - searchLen)
+        {
+            // No point searching beyond the possible end point.
+            position = inputLen - searchLen;
+        }
+        const char16* const searchUpperBound = searchLowerBound + min(position, inputLen - 1);
+
+        // 8. Let searchLen be the number of elements in searchStr.
+        // 9. Return the largest possible nonnegative integer k not larger than start such that k + searchLen is
+        //    not greater than len, and for all nonnegative integers j less than searchLen, the code unit at
+        //    index k + j of S is the same as the code unit at index j of searchStr; but if there is no such
+        //    integer k, return the value - 1.
+        // Note: The lastIndexOf function is intentionally generic; it does not require that its this value be a
+        //    String object. Therefore, it can be transferred to other kinds of objects for use as a method.
+
         // Zero length search strings are always found at the current search position
-        if ( searchLen == 0 )
+        if (searchLen == 0)
         {
             return JavascriptNumber::ToVar(position, scriptContext);
         }
         else if (searchLen == 1)
         {
-            char16 const * current = inputStr + min(position,len - 1);
+            char16 const * current = searchUpperBound;
             while (*current != *searchStr)
             {
                 current--;
                 if (current < inputStr)
                 {
-                    return JavascriptNumber::ToVar(result, scriptContext); //return -1
+                    return JavascriptNumber::ToVar(-1, scriptContext);
                 }
             }
-            result =  (int)(current - inputStr);
-            return JavascriptNumber::ToVar(result, scriptContext);
+            return JavascriptNumber::ToVar(current - inputStr, scriptContext);
         }
 
         // Structure for a partial ASCII Boyer-Moore
         JmpTable jmpTable;
-        bool fAsciiJumpTable = BuildFirstCharBackwardBoyerMooreTable(jmpTable, searchStr, searchLen);
-
-        if (!fAsciiJumpTable)
+        if (BuildFirstCharBackwardBoyerMooreTable(jmpTable, searchStr, searchLen))
         {
-            char16 const * start = inputStr;
-            char16 const * current = inputStr + min(position, len - 1);
-            char16 const * searchStrEnd = searchStr + searchLen - 1;
-            while (current >= (start + searchLen - 1))
-            {
-                char16 const * s1 = current;
-                char16 const * s2 = searchStrEnd;
-
-                while (s1 >= start && s2 >= searchStr && !(*s1 - *s2))
-                {
-                    s1--, s2--;
-                }
-
-                if (s2 < searchStr)
-                {
-                    result = (int)(current - start) - searchLen + 1;
-                    return JavascriptNumber::ToVar(result, scriptContext);
-                }
-
-                current--;
-            }
+            int result = LastIndexOfUsingJmpTable(jmpTable, inputStr, inputLen, searchStr, searchLen, position);
             return JavascriptNumber::ToVar(result, scriptContext);
         }
-        else
+
+        // Revert to slow search if we decided not to do Boyer-Moore.
+        char16 const * currentPos = searchUpperBound;
+        Assert(currentPos - searchLowerBound + searchLen <= inputLen);
+        while (currentPos >= searchLowerBound)
         {
-            result = LastIndexOfUsingJmpTable(jmpTable, inputStr, len, searchStr, searchLen, position);
+            if (*currentPos == *searchStr)
+            {
+                // Quick start char chec
+                if (wmemcmp(currentPos, searchStr, searchLen) == 0)
+                {
+                    return JavascriptNumber::ToVar(currentPos - searchLowerBound, scriptContext);
+                }
+            }
+            --currentPos;
         }
-        return JavascriptNumber::ToVar(result, scriptContext);
+        return JavascriptNumber::ToVar(-1, scriptContext);
     }
 
     // Performs common ES spec steps for getting this argument in string form:
@@ -1736,18 +1759,18 @@ case_2:
         }
 
         RecyclableObject* fnObj = RecyclableObject::FromVar(fn);
-        return CallRegExFunction<argCount>(fnObj, regExp, args);
+        return CallRegExFunction<argCount>(fnObj, regExp, args, scriptContext);
     }
 
     template<>
-    Var JavascriptString::CallRegExFunction<1>(RecyclableObject* fnObj, Var regExp, Arguments& args)
+    Var JavascriptString::CallRegExFunction<1>(RecyclableObject* fnObj, Var regExp, Arguments& args, ScriptContext *scriptContext)
     {
         // args[0]: String
-        return CALL_FUNCTION(fnObj, CallInfo(CallFlags_Value, 2), regExp, args[0]);
+        return CALL_FUNCTION(scriptContext->GetThreadContext(), fnObj, CallInfo(CallFlags_Value, 2), regExp, args[0]);
     }
 
     template<>
-    Var JavascriptString::CallRegExFunction<2>(RecyclableObject* fnObj, Var regExp, Arguments& args)
+    Var JavascriptString::CallRegExFunction<2>(RecyclableObject* fnObj, Var regExp, Arguments& args, ScriptContext * scriptContext)
     {
         // args[0]: String
         // args[1]: RegExp (ignored since we need to create one when the argument is "undefined")
@@ -1755,10 +1778,10 @@ case_2:
 
         if (args.Info.Count < 3)
         {
-            return CallRegExFunction<1>(fnObj, regExp, args);
+            return CallRegExFunction<1>(fnObj, regExp, args, scriptContext);
         }
 
-        return CALL_FUNCTION(fnObj, CallInfo(CallFlags_Value, 3), regExp, args[0], args[2]);
+        return CALL_FUNCTION(scriptContext->GetThreadContext(), fnObj, CallInfo(CallFlags_Value, 3), regExp, args[0], args[2]);
     }
 
     Var JavascriptString::EntrySlice(RecyclableObject* function, CallInfo callInfo, ...)
@@ -2001,7 +2024,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(PadStartCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_padStart);
 
         JavascriptString * pThis = nullptr;
         GetThisStringArgument(args, scriptContext, _u("String.prototype.padStart"), &pThis);
@@ -2017,7 +2040,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(PadEndCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_padEnd);
 
         JavascriptString * pThis = nullptr;
         GetThisStringArgument(args, scriptContext, _u("String.prototype.padEnd"), &pThis);
@@ -2240,7 +2263,7 @@ case_2:
                 {
                     if (*i <= 'Z') { break; }
                     if (*i >= 192)
-                    { 
+                    {
                         if (*i < 223) { break; }
                         if (*i >= 255) { break; }
                     }
@@ -2296,7 +2319,7 @@ case_2:
 
         ARGUMENTS(args, callInfo);
         ScriptContext* scriptContext = function->GetScriptContext();
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(StringTrimCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_trim);
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -2423,7 +2446,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(RepeatCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_repeat);
 
         JavascriptString* pThis = nullptr;
         GetThisStringArgument(args, scriptContext, _u("String.prototype.repeat"), &pThis);
@@ -2506,7 +2529,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(StartsWithCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_startsWith);
 
         JavascriptString * pThis;
         JavascriptString * pSearch;
@@ -2559,7 +2582,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(EndsWithCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_endsWith);
 
         JavascriptString * pThis;
         JavascriptString * pSearch;
@@ -2612,7 +2635,7 @@ case_2:
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ContainsCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(String_Prototype_contains);
 
         return JavascriptBoolean::ToVar(IndexOf(args, scriptContext, _u("String.prototype.includes"), false) != -1, scriptContext);
     }
@@ -3002,21 +3025,7 @@ case_2:
 
     bool JavascriptString::Equals(Var aLeft, Var aRight)
     {
-        AssertMsg(JavascriptString::Is(aLeft) && JavascriptString::Is(aRight), "string comparison");
-
-        JavascriptString *leftString  = JavascriptString::FromVar(aLeft);
-        JavascriptString *rightString = JavascriptString::FromVar(aRight);
-
-        if (leftString->GetLength() != rightString->GetLength())
-        {
-            return false;
-        }
-
-        if (wmemcmp(leftString->GetString(), rightString->GetString(), leftString->GetLength()) == 0)
-        {
-            return true;
-        }
-        return false;
+        return JavascriptStringHelpers<JavascriptString>::Equals(aLeft, aRight);
     }
 
     //
@@ -3344,7 +3353,7 @@ case_2:
         return builder.ToString();
     }
 
-    int JavascriptString::IndexOfUsingJmpTable(JmpTable jmpTable, const char16* inputStr, int len, const char16* searchStr, int searchLen, int position)
+    int JavascriptString::IndexOfUsingJmpTable(JmpTable jmpTable, const char16* inputStr, charcount_t len, const char16* searchStr, int searchLen, int position)
     {
         int result = -1;
 
@@ -3391,7 +3400,7 @@ case_2:
         return result;
     }
 
-    int JavascriptString::LastIndexOfUsingJmpTable(JmpTable jmpTable, const char16* inputStr, int len, const char16* searchStr, int searchLen, int position)
+    int JavascriptString::LastIndexOfUsingJmpTable(JmpTable jmpTable, const char16* inputStr, charcount_t len, const char16* searchStr, charcount_t searchLen, charcount_t position)
     {
         const char16 searchFirst = searchStr[0];
         uint32 lMatchedJump = searchLen;
@@ -3823,10 +3832,11 @@ case_2:
         return this->GetItemAt(index, value);
     }
 
-    BOOL JavascriptString::GetEnumerator(BOOL enumNonEnumerable, Var* enumerator, ScriptContext * requestContext, bool preferSnapshotSemantics, bool enumSymbols)
+    BOOL JavascriptString::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache)
     {
-        *enumerator = RecyclerNew(GetScriptContext()->GetRecycler(), JavascriptStringEnumerator, this, requestContext);
-        return true;
+        return enumerator->Initialize(
+            RecyclerNew(GetScriptContext()->GetRecycler(), JavascriptStringEnumerator, this, requestContext),
+            nullptr, nullptr, flags, requestContext, forInCache);
     }
 
     BOOL JavascriptString::DeleteProperty(PropertyId propertyId, PropertyOperationFlags propertyOperationFlags)
@@ -3838,6 +3848,18 @@ case_2:
             return FALSE;
         }
         return __super::DeleteProperty(propertyId, propertyOperationFlags);
+    }
+
+    BOOL JavascriptString::DeleteProperty(JavascriptString *propertyNameString, PropertyOperationFlags propertyOperationFlags)
+    {
+        JsUtil::CharacterBuffer<WCHAR> propertyName(propertyNameString->GetString(), propertyNameString->GetLength());
+        if (BuiltInPropertyRecords::length.Equals(propertyName))
+        {
+            JavascriptError::ThrowCantDeleteIfStrictMode(propertyOperationFlags, this->GetScriptContext(), propertyNameString->GetString());
+
+            return FALSE;
+        }
+        return __super::DeleteProperty(propertyNameString, propertyOperationFlags);
     }
 
     BOOL JavascriptString::GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext)
@@ -3863,4 +3885,32 @@ case_2:
     {
         return requestContext->GetLibrary()->GetStringTypeDisplayString();
     }
+
+    /* static */
+    template <typename T>
+    bool JavascriptStringHelpers<T>::Equals(Var aLeft, Var aRight)
+    {
+        AssertMsg(T::Is(aLeft) && T::Is(aRight), "string comparison");
+
+        if (aLeft == aRight) return true;
+
+        T *leftString = T::FromVar(aLeft);
+        T *rightString = T::FromVar(aRight);
+
+        if (leftString->GetLength() != rightString->GetLength())
+        {
+            return false;
+        }
+
+        if (wmemcmp(leftString->GetString(), rightString->GetString(), leftString->GetLength()) == 0)
+        {
+            return true;
+        }
+        return false;
+    }
+
+#if ENABLE_NATIVE_CODEGEN
+    template bool JavascriptStringHelpers<JITJavascriptString>::Equals(Var aLeft, Var aRight);
+#endif
+
 }

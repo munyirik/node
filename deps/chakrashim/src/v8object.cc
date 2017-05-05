@@ -24,7 +24,6 @@
 
 namespace v8 {
 
-using std::unique_ptr;
 using namespace jsrt;
 
 enum AccessorType {
@@ -105,14 +104,14 @@ Maybe<bool> Object::Set(Handle<Value> key, Handle<Value> value,
     }
 
 
-    if (DefineProperty((JsValueRef)this,
-                       idRef,
-                       writable,
-                       enumerable,
-                       configurable,
-                       (JsValueRef)*value,
-                       JS_INVALID_REFERENCE,
-                       JS_INVALID_REFERENCE) != JsNoError) {
+    if (jsrt::DefineProperty((JsValueRef)this,
+                             idRef,
+                             writable,
+                             enumerable,
+                             configurable,
+                             (JsValueRef)*value,
+                             JS_INVALID_REFERENCE,
+                             JS_INVALID_REFERENCE) != JsNoError) {
       return Nothing<bool>();
     }
   }
@@ -134,6 +133,69 @@ Maybe<bool> Object::DefineOwnProperty(
     Local<Context> context, Local<Name> key, Local<Value> value,
     PropertyAttribute attributes) {
   return Set(key, value, attributes, /*force*/true);
+}
+
+Maybe<bool> Object::DefineProperty(Local<v8::Context> context,
+                                   Local<Name> key,
+                                   PropertyDescriptor& descriptor) {
+  JsPropertyIdRef idRef;
+
+  if (GetPropertyIdFromValue((JsValueRef)*key, &idRef) != JsNoError) {
+    return Nothing<bool>();
+  }
+
+  Local<Value> value = descriptor.value();
+  Local<Value> get = descriptor.get();
+  Local<Value> set = descriptor.set();
+
+  // Do it faster if there are no property attributes nor accessors
+  if (get.IsEmpty() && set.IsEmpty() &&
+      !descriptor.has_enumerable() &&
+      !descriptor.has_configurable() &&
+      !descriptor.has_writable()) {
+    if (JsSetProperty((JsValueRef)this,
+                      idRef, (JsValueRef)*value, false) != JsNoError) {
+      return Nothing<bool>();
+    }
+  } else {  // we have attributes just use it
+    PropertyDescriptorOptionValues enumerable =
+      PropertyDescriptorOptionValues::None;
+    PropertyDescriptorOptionValues configurable =
+      PropertyDescriptorOptionValues::None;
+    PropertyDescriptorOptionValues writable =
+      PropertyDescriptorOptionValues::None;
+
+    if (descriptor.has_enumerable()) {
+      enumerable = descriptor.enumerable() ?
+        PropertyDescriptorOptionValues::True :
+        PropertyDescriptorOptionValues::False;
+    }
+
+    if (descriptor.has_configurable()) {
+      configurable = descriptor.configurable() ?
+        PropertyDescriptorOptionValues::True :
+        PropertyDescriptorOptionValues::False;
+    }
+
+    if (descriptor.has_writable()) {
+      writable = descriptor.writable() ?
+        PropertyDescriptorOptionValues::True :
+        PropertyDescriptorOptionValues::False;
+    }
+
+    if (jsrt::DefineProperty((JsValueRef)this,
+                             idRef,
+                             writable,
+                             enumerable,
+                             configurable,
+                             (JsValueRef)*value,
+                             (JsValueRef)*get,
+                             (JsValueRef)*set) != JsNoError) {
+      return Nothing<bool>();
+    }
+  }
+
+  return Just(true);
 }
 
 bool Object::Set(uint32_t index, Handle<Value> value) {
@@ -279,7 +341,7 @@ bool Object::Delete(uint32_t index) {
   return FromMaybe(Delete(Local<Context>(), index));
 }
 
-void CALLBACK AcessorExternalObjectFinalizeCallback(void *data) {
+void CHAKRA_CALLBACK AcessorExternalObjectFinalizeCallback(void *data) {
   if (data != nullptr) {
     AccessorExternalData *accessorData =
       static_cast<AccessorExternalData*>(data);
@@ -343,14 +405,14 @@ Maybe<bool> Object::SetAccessor(Handle<Name> name,
 
   // CHAKRA-TODO: we ignore  AccessControl for now..
 
-  if (DefineProperty((JsValueRef)this,
-                     idRef,
-                     PropertyDescriptorOptionValues::None,
-                     enumerable,
-                     configurable,
-                     JS_INVALID_REFERENCE,
-                     getterRef,
-                     setterRef) != JsNoError) {
+  if (jsrt::DefineProperty((JsValueRef)this,
+                           idRef,
+                           PropertyDescriptorOptionValues::None,
+                           enumerable,
+                           configurable,
+                           JS_INVALID_REFERENCE,
+                           getterRef,
+                           setterRef) != JsNoError) {
     return Nothing<bool>();
   }
 
@@ -406,13 +468,17 @@ Local<Array> Object::GetPropertyNames() {
 }
 
 MaybeLocal<Array> Object::GetOwnPropertyNames(Local<Context> context) {
-  JsValueRef arrayRef;
+  ContextShim* contextShim = ContextShim::GetCurrent();
+  JsValueRef getOwnPropertyNamesFunction =
+    contextShim->GetgetOwnPropertyNamesFunction();
 
-  if (JsGetOwnPropertyNames((JsValueRef)this, &arrayRef) != JsNoError) {
+  JsValueRef result;
+
+  if (jsrt::CallFunction(getOwnPropertyNamesFunction, (JsValueRef)this,
+                         &result) != JsNoError) {
     return Local<Array>();
   }
-
-  return Local<Array>::New(arrayRef);
+  return Local<Array>::New(result);
 }
 
 Local<Array> Object::GetOwnPropertyNames() {
@@ -444,8 +510,7 @@ bool Object::SetPrototype(Handle<Value> prototype) {
 
 MaybeLocal<String> Object::ObjectProtoToString(Local<Context> context) {
   ContextShim* contextShim = ContextShim::GetCurrent();
-  JsValueRef toString = contextShim->GetGlobalPrototypeFunction(
-    ContextShim::GlobalPrototypeFunction::Object_toString);
+  JsValueRef toString = contextShim->GetToStringFunction();
 
   JsValueRef result;
   JsValueRef args[] = { this };
@@ -526,11 +591,11 @@ Maybe<PropertyAttribute> Object::GetRealNamedPropertyAttributes(
   return GetPropertyAttributes(context, key);
 }
 
-JsValueRef CALLBACK Utils::AccessorHandler(JsValueRef callee,
-                                           bool isConstructCall,
-                                           JsValueRef *arguments,
-                                           unsigned short argumentCount,
-                                           void *callbackState) {
+JsValueRef CHAKRA_CALLBACK Utils::AccessorHandler(JsValueRef callee,
+                                                  bool isConstructCall,
+                                                  JsValueRef *arguments,
+                                                  unsigned short argumentCount,
+                                                  void *callbackState) {
   void *externalData;
   JsValueRef result = JS_INVALID_REFERENCE;
 
@@ -751,6 +816,44 @@ Local<Object> Object::New(Isolate* isolate) {
 Object *Object::Cast(Value *obj) {
   CHAKRA_ASSERT(obj->IsObject());
   return static_cast<Object*>(obj);
+}
+
+Maybe<bool> Object::CreateDataProperty(Local<Context> context, Local<Name> key,
+                                       Local<Value> value) {
+  return Set(context, key, value);
+}
+
+Maybe<bool> Object::CreateDataProperty(Local<Context> context, uint32_t index,
+                                       Local<Value> value) {
+  return Set(context, index, value);
+}
+
+void Object::SetAccessorProperty(Local<Name> name, Local<Function> getter,
+                                 Local<Function> setter,
+                                 PropertyAttribute attribute,
+                                 AccessControl settings) {
+  JsPropertyIdRef idRef;
+  if (GetPropertyIdFromName((JsValueRef)*name, &idRef) != JsNoError) {
+    return;
+  }
+
+  PropertyDescriptorOptionValues enumerable =
+      GetPropertyDescriptorOptionValue(!(attribute & DontEnum));
+  PropertyDescriptorOptionValues configurable =
+      GetPropertyDescriptorOptionValue(!(attribute & DontDelete));
+
+  // CHAKRA-TODO: we ignore  AccessControl for now..
+
+  if (jsrt::DefineProperty((JsValueRef)this,
+                           idRef,
+                           PropertyDescriptorOptionValues::None,
+                           enumerable,
+                           configurable,
+                           JS_INVALID_REFERENCE,
+                           (JsValueRef)*getter,
+                           (JsValueRef)*setter) != JsNoError) {
+    return;
+  }
 }
 
 }  // namespace v8

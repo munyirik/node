@@ -15,8 +15,10 @@ const http = require('http');
 const numCPUs = require('os').cpus().length;
 
 if (cluster.isMaster) {
+  console.log(`Master ${process.pid} is running`);
+
   // Fork workers.
-  for (var i = 0; i < numCPUs; i++) {
+  for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
   }
 
@@ -30,20 +32,23 @@ if (cluster.isMaster) {
     res.writeHead(200);
     res.end('hello world\n');
   }).listen(8000);
+
+  console.log(`Worker ${process.pid} started`);
 }
 ```
 
 Running Node.js will now share port 8000 between the workers:
 
 ```txt
-$ NODE_DEBUG=cluster node server.js
-23521,Master Worker 23524 online
-23521,Master Worker 23526 online
-23521,Master Worker 23523 online
-23521,Master Worker 23528 online
+$ node server.js
+Master 3596 is running
+Worker 4324 started
+Worker 4520 started
+Worker 6056 started
+Worker 5644 started
 ```
 
-Please note that, on Windows, it is not yet possible to set up a named pipe
+Please note that on Windows, it is not yet possible to set up a named pipe
 server in a worker.
 
 ## How It Works
@@ -143,8 +148,8 @@ In a worker you can also use `process.on('error')`.
 added: v0.11.2
 -->
 
-* `code` {Number} the exit code, if it exited normally.
-* `signal` {String} the name of the signal (eg. `'SIGHUP'`) that caused
+* `code` {number} the exit code, if it exited normally.
+* `signal` {string} the name of the signal (e.g. `'SIGHUP'`) that caused
   the process to be killed.
 
 Similar to the `cluster.on('exit')` event, but specific to this worker.
@@ -202,27 +207,27 @@ const http = require('http');
 if (cluster.isMaster) {
 
   // Keep track of http requests
-  var numReqs = 0;
+  let numReqs = 0;
   setInterval(() => {
-    console.log('numReqs =', numReqs);
+    console.log(`numReqs = ${numReqs}`);
   }, 1000);
 
   // Count requests
   function messageHandler(msg) {
-    if (msg.cmd && msg.cmd == 'notifyRequest') {
+    if (msg.cmd && msg.cmd === 'notifyRequest') {
       numReqs += 1;
     }
   }
 
   // Start workers and listen for messages containing notifyRequest
   const numCPUs = require('os').cpus().length;
-  for (var i = 0; i < numCPUs; i++) {
+  for (let i = 0; i < numCPUs; i++) {
     cluster.fork();
   }
 
-  Object.keys(cluster.workers).forEach((id) => {
+  for (const id in cluster.workers) {
     cluster.workers[id].on('message', messageHandler);
-  });
+  }
 
 } else {
 
@@ -255,7 +260,13 @@ It is not emitted in the worker.
 ### worker.disconnect()
 <!-- YAML
 added: v0.7.7
+changes:
+  - version: v7.3.0
+    pr-url: https://github.com/nodejs/node/pull/10019
+    description: This method now returns a reference to `worker`.
 -->
+
+* Returns: {Worker} A reference to `worker`.
 
 In a worker, this function will close all servers, wait for the `'close'` event on
 those servers, and then disconnect the IPC channel.
@@ -285,8 +296,8 @@ the `'disconnect'` event has not been emitted after some time.
 
 ```js
 if (cluster.isMaster) {
-  var worker = cluster.fork();
-  var timeout;
+  const worker = cluster.fork();
+  let timeout;
 
   worker.on('listening', (address) => {
     worker.send('shutdown');
@@ -302,7 +313,7 @@ if (cluster.isMaster) {
 
 } else if (cluster.isWorker) {
   const net = require('net');
-  var server = net.createServer((socket) => {
+  const server = net.createServer((socket) => {
     // connections never end
   });
 
@@ -321,7 +332,7 @@ if (cluster.isMaster) {
 added: v6.0.0
 -->
 
-* {Boolean}
+* {boolean}
 
 Set by calling `.kill()` or `.disconnect()`. Until then, it is `undefined`.
 
@@ -345,7 +356,7 @@ worker.kill();
 added: v0.8.0
 -->
 
-* {Number}
+* {number}
 
 Each new worker is given its own unique id, this id is stored in the
 `id`.
@@ -375,7 +386,7 @@ because of exiting or being signaled). Otherwise, it returns `false`.
 added: v0.9.12
 -->
 
-* `signal` {String} Name of the kill signal to send to the worker
+* `signal` {string} Name of the kill signal to send to the worker
   process.
 
 This function will kill the worker. In the master, it does this by disconnecting
@@ -409,12 +420,16 @@ accidental disconnection.
 ### worker.send(message[, sendHandle][, callback])
 <!-- YAML
 added: v0.7.0
+changes:
+  - version: v4.0.0
+    pr-url: https://github.com/nodejs/node/pull/2620
+    description: The `callback` parameter is supported now.
 -->
 
 * `message` {Object}
 * `sendHandle` {Handle}
 * `callback` {Function}
-* Return: Boolean
+* Returns: Boolean
 
 Send a message to a worker or master, optionally with a handle.
 
@@ -428,7 +443,7 @@ This example will echo back all messages from the master:
 
 ```js
 if (cluster.isMaster) {
-  var worker = cluster.fork();
+  const worker = cluster.fork();
   worker.send('hi there');
 
 } else if (cluster.isWorker) {
@@ -442,6 +457,10 @@ if (cluster.isMaster) {
 <!-- YAML
 added: v0.7.0
 deprecated: v6.0.0
+changes:
+  - version: v7.0.0
+    pr-url: https://github.com/nodejs/node/pull/3747
+    description: Accessing this property will now emit a deprecation warning.
 -->
 
 > Stability: 0 - Deprecated: Use [`worker.exitedAfterDisconnect`][] instead.
@@ -495,8 +514,8 @@ added: v0.7.9
 -->
 
 * `worker` {cluster.Worker}
-* `code` {Number} the exit code, if it exited normally.
-* `signal` {String} the name of the signal (eg. `'SIGHUP'`) that caused
+* `code` {number} the exit code, if it exited normally.
+* `signal` {string} the name of the signal (e.g. `'SIGHUP'`) that caused
   the process to be killed.
 
 When any of the workers die the cluster module will emit the `'exit'` event.
@@ -524,7 +543,7 @@ When a new worker is forked the cluster module will emit a `'fork'` event.
 This can be used to log worker activity, and create your own timeout.
 
 ```js
-var timeouts = [];
+const timeouts = [];
 function errorMsg() {
   console.error('Something must be wrong with the connection ...');
 }
@@ -572,6 +591,13 @@ The `addressType` is one of:
 * `"udp4"` or `"udp6"` (UDP v4 or v6)
 
 ## Event: 'message'
+<!-- YAML
+added: v2.5.0
+changes:
+  - version: v6.0.0
+    pr-url: https://github.com/nodejs/node/pull/5361
+    description: The `worker` parameter is passed now; see below for details.
+-->
 
 * `worker` {cluster.Worker}
 * `message` {Object}
@@ -588,7 +614,7 @@ If you need to support older versions and don't need the worker object,
 you can work around the discrepancy by checking the number of arguments:
 
 ```js
-cluster.on('message', function(worker, message, handle) {
+cluster.on('message', (worker, message, handle) => {
   if (arguments.length === 2) {
     handle = message;
     message = worker;
@@ -665,7 +691,7 @@ This can only be called from the master process.
 added: v0.8.1
 -->
 
-* {Boolean}
+* {boolean}
 
 True if the process is a master. This is determined
 by the `process.env.NODE_UNIQUE_ID`. If `process.env.NODE_UNIQUE_ID` is
@@ -676,7 +702,7 @@ undefined, then `isMaster` is `true`.
 added: v0.6.0
 -->
 
-* {Boolean}
+* {boolean}
 
 True if the process is not a master (it is the negation of `cluster.isMaster`).
 
@@ -701,21 +727,25 @@ values are `"rr"` and `"none"`.
 ## cluster.settings
 <!-- YAML
 added: v0.7.1
+changes:
+  - version: v6.4.0
+    pr-url: https://github.com/nodejs/node/pull/7838
+    description: The `stdio` option is supported now.
 -->
 
 * {Object}
   * `execArgv` {Array} list of string arguments passed to the Node.js
     executable. (Default=`process.execArgv`)
-  * `exec` {String} file path to worker file.  (Default=`process.argv[1]`)
+  * `exec` {string} file path to worker file.  (Default=`process.argv[1]`)
   * `args` {Array} string arguments passed to worker.
     (Default=`process.argv.slice(2)`)
-  * `silent` {Boolean} whether or not to send output to parent's stdio.
+  * `silent` {boolean} whether or not to send output to parent's stdio.
     (Default=`false`)
   * `stdio` {Array} Configures the stdio of forked processes. Because the
     cluster module relies on IPC to function, this configuration must contain an
     `'ipc'` entry. When this option is provided, it overrides `silent`.
-  * `uid` {Number} Sets the user identity of the process. (See setuid(2).)
-  * `gid` {Number} Sets the group identity of the process. (See setgid(2).)
+  * `uid` {number} Sets the user identity of the process. (See setuid(2).)
+  * `gid` {number} Sets the group identity of the process. (See setgid(2).)
 
 After calling `.setupMaster()` (or `.fork()`) this settings object will contain
 the settings, including the default values.
@@ -725,13 +755,17 @@ This object is not supposed to be changed or set manually, by you.
 ## cluster.setupMaster([settings])
 <!-- YAML
 added: v0.7.1
+changes:
+  - version: v6.4.0
+    pr-url: https://github.com/nodejs/node/pull/7838
+    description: The `stdio` option is supported now.
 -->
 
 * `settings` {Object}
-  * `exec` {String} file path to worker file.  (Default=`process.argv[1]`)
+  * `exec` {string} file path to worker file.  (Default=`process.argv[1]`)
   * `args` {Array} string arguments passed to worker.
     (Default=`process.argv.slice(2)`)
-  * `silent` {Boolean} whether or not to send output to parent's stdio.
+  * `silent` {boolean} whether or not to send output to parent's stdio.
     (Default=`false`)
   * `stdio` {Array} Configures the stdio of forked processes. When this option
     is provided, it overrides `silent`.
@@ -807,7 +841,7 @@ before last `'disconnect'` or `'exit'` event is emitted.
 ```js
 // Go through all workers
 function eachWorker(callback) {
-  for (var id in cluster.workers) {
+  for (const id in cluster.workers) {
     callback(cluster.workers[id]);
   }
 }
@@ -821,7 +855,7 @@ the worker's unique id is the easiest way to find the worker.
 
 ```js
 socket.on('data', (id) => {
-  var worker = cluster.workers[id];
+  const worker = cluster.workers[id];
 });
 ```
 

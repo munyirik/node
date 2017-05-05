@@ -3,19 +3,29 @@
 const child_process = require('child_process');
 const http_benchmarkers = require('./_http-benchmarkers.js');
 
-exports.createBenchmark = function(fn, options) {
-  return new Benchmark(fn, options);
+exports.createBenchmark = function(fn, configs, options) {
+  return new Benchmark(fn, configs, options);
 };
 
-function Benchmark(fn, options) {
+function Benchmark(fn, configs, options) {
+  // Use the file name as the name of the benchmark
   this.name = require.main.filename.slice(__dirname.length + 1);
-  const parsed_args = this._parseArgs(process.argv.slice(2), options);
+  // Parse job-specific configuration from the command line arguments
+  const parsed_args = this._parseArgs(process.argv.slice(2), configs);
   this.options = parsed_args.cli;
   this.extra_options = parsed_args.extra;
+  // The configuration list as a queue of jobs
   this.queue = this._queue(this.options);
+  // The configuration of the current job, head of the queue
   this.config = this.queue[0];
-
-  this._time = [0, 0]; // holds process.hrtime value
+  // Execution arguments i.e. flags used to run the jobs
+  this.flags = [];
+  if (options && options.flags) {
+    this.flags = this.flags.concat(options.flags);
+  }
+  // Holds process.hrtime value
+  this._time = [0, 0];
+  // Used to make sure a benchmark only start a timer once
   this._started = false;
 
   // this._run will use fork() to create a new process for each configuration
@@ -27,8 +37,8 @@ function Benchmark(fn, options) {
   }
 }
 
-Benchmark.prototype._parseArgs = function(argv, options) {
-  const cliOptions = Object.assign({}, options);
+Benchmark.prototype._parseArgs = function(argv, configs) {
+  const cliOptions = {};
   const extraOptions = {};
   // Parse configuration arguments
   for (const arg of argv) {
@@ -37,17 +47,20 @@ Benchmark.prototype._parseArgs = function(argv, options) {
       console.error('bad argument: ' + arg);
       process.exit(1);
     }
+    const config = match[1];
 
-    if (options[match[1]]) {
-      // Infer the type from the options object and parse accordingly
-      const isNumber = typeof options[match[1]][0] === 'number';
+    if (configs[config]) {
+      // Infer the type from the config object and parse accordingly
+      const isNumber = typeof configs[config][0] === 'number';
       const value = isNumber ? +match[2] : match[2];
-      cliOptions[match[1]] = [value];
+      if (!cliOptions[config])
+        cliOptions[config] = [];
+      cliOptions[config].push(value);
     } else {
-      extraOptions[match[1]] = match[2];
+      extraOptions[config] = match[2];
     }
   }
-  return { cli: cliOptions, extra: extraOptions };
+  return { cli: Object.assign({}, configs, cliOptions), extra: extraOptions };
 };
 
 Benchmark.prototype._queue = function(options) {
@@ -118,6 +131,14 @@ Benchmark.prototype.http = function(options, cb) {
 
 Benchmark.prototype._run = function() {
   const self = this;
+  // If forked, report to the parent.
+  if (process.send) {
+    process.send({
+      type: 'config',
+      name: this.name,
+      queueLength: this.queue.length
+    });
+  }
 
   (function recursive(queueIndex) {
     const config = self.queue[queueIndex];
@@ -137,7 +158,8 @@ Benchmark.prototype._run = function() {
     }
 
     const child = child_process.fork(require.main.filename, childArgs, {
-      env: childEnv
+      env: childEnv,
+      execArgv: self.flags.concat(process.execArgv)
     });
     child.on('message', sendResult);
     child.on('close', function(code) {
@@ -171,6 +193,9 @@ Benchmark.prototype.end = function(operations) {
   if (typeof operations !== 'number') {
     throw new Error('called end() without specifying operation count');
   }
+  if (!process.env.NODEJS_BENCHMARK_ZERO_ALLOWED && operations <= 0) {
+    throw new Error('called end() with operation count <= 0');
+  }
 
   const time = elapsed[0] + elapsed[1] / 1e9;
   const rate = operations / time;
@@ -184,7 +209,10 @@ function formatResult(data) {
     conf += ' ' + key + '=' + JSON.stringify(data.conf[key]);
   }
 
-  return `${data.name}${conf}: ${data.rate}`;
+  var rate = data.rate.toString().split('.');
+  rate[0] = rate[0].replace(/(\d)(?=(\d\d\d)+(?!\d))/g, '$1,');
+  rate = (rate[1] ? rate.join('.') : rate[0]);
+  return `${data.name}${conf}: ${rate}`;
 }
 
 function sendResult(data) {
@@ -203,17 +231,7 @@ Benchmark.prototype.report = function(rate, elapsed) {
     name: this.name,
     conf: this.config,
     rate: rate,
-    time: elapsed[0] + elapsed[1] / 1e9
+    time: elapsed[0] + elapsed[1] / 1e9,
+    type: 'report'
   });
-};
-
-exports.v8ForceOptimization = function(method, ...args) {
-  if (typeof method !== 'function')
-    return;
-  const v8 = require('v8');
-  v8.setFlagsFromString('--allow_natives_syntax');
-  method.apply(null, args);
-  eval('%OptimizeFunctionOnNextCall(method)');
-  method.apply(null, args);
-  return eval('%GetOptimizationStatus(method)');
 };

@@ -37,7 +37,7 @@ class PageParallelJob {
   // glibc. See http://crbug.com/609249 and
   // https://sourceware.org/bugzilla/show_bug.cgi?id=12674.
   // The caller must provide a semaphore with value 0 and ensure that
-  // the lifetime of the semaphore is the same as the lifetime of the Isolate
+  // the lifetime of the semaphore is the same as the lifetime of the Isolate.
   // It is guaranteed that the semaphore value will be 0 after Run() call.
   PageParallelJob(Heap* heap, CancelableTaskManager* cancelable_task_manager,
                   base::Semaphore* semaphore)
@@ -103,7 +103,8 @@ class PageParallelJob {
     delete main_task;
     // Wait for background tasks.
     for (int i = 0; i < num_tasks_; i++) {
-      if (!cancelable_task_manager_->TryAbort(task_ids[i])) {
+      if (cancelable_task_manager_->TryAbort(task_ids[i]) !=
+          CancelableTaskManager::kTaskAborted) {
         pending_tasks_->Wait();
       }
     }
@@ -127,7 +128,7 @@ class PageParallelJob {
     Item(MemoryChunk* chunk, typename JobTraits::PerPageData data, Item* next)
         : chunk(chunk), state(kAvailable), data(data), next(next) {}
     MemoryChunk* chunk;
-    AtomicValue<ProcessingState> state;
+    base::AtomicValue<ProcessingState> state;
     typename JobTraits::PerPageData data;
     Item* next;
   };

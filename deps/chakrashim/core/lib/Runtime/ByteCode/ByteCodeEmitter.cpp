@@ -250,6 +250,9 @@ Js::OpCode ByteCodeGenerator::ToChkUndeclOp(Js::OpCode op) const
     case Js::OpCode::StLocalSlot:
         return Js::OpCode::StLocalSlotChkUndecl;
 
+    case Js::OpCode::StParamSlot:
+        return Js::OpCode::StParamSlotChkUndecl;
+
     case Js::OpCode::StInnerSlot:
         return Js::OpCode::StInnerSlotChkUndecl;
 
@@ -261,6 +264,9 @@ Js::OpCode ByteCodeGenerator::ToChkUndeclOp(Js::OpCode op) const
 
     case Js::OpCode::StLocalObjSlot:
         return Js::OpCode::StLocalObjSlotChkUndecl;
+
+    case Js::OpCode::StParamObjSlot:
+        return Js::OpCode::StParamObjSlotChkUndecl;
 
     case Js::OpCode::StInnerObjSlot:
         return Js::OpCode::StInnerObjSlotChkUndecl;
@@ -513,7 +519,7 @@ void ByteCodeGenerator::LoadUncachedHeapArguments(FuncInfo *funcInfo)
     Symbol *argSym = funcInfo->GetArgumentsSymbol();
     Assert(argSym && argSym->GetIsArguments());
     Js::RegSlot argumentsLoc = argSym->GetLocation();
-    
+
 
     Js::OpCode opcode = !funcInfo->root->sxFnc.HasNonSimpleParameterList() ? Js::OpCode::LdHeapArguments : Js::OpCode::LdLetHeapArguments;
     bool hasRest = funcInfo->root->sxFnc.pnodeRest != nullptr;
@@ -533,7 +539,7 @@ void ByteCodeGenerator::LoadUncachedHeapArguments(FuncInfo *funcInfo)
         // Pass the frame object and ID array to the runtime, and put the resulting Arguments object
         // at the expected location.
 
-        Js::PropertyIdArray *propIds = funcInfo->GetParsedFunctionBody()->AllocatePropertyIdArrayForFormals(count * sizeof(Js::PropertyId), count);
+        Js::PropertyIdArray *propIds = funcInfo->GetParsedFunctionBody()->AllocatePropertyIdArrayForFormals(count * sizeof(Js::PropertyId), count, 0);
         GetFormalArgsArray(this, funcInfo, propIds);
     }
 
@@ -682,7 +688,7 @@ void ByteCodeGenerator::InitBlockScopedContent(ParseNode *pnodeBlock, Js::Debugg
             {
                 TrackSlotArrayPropertyForDebugger(debuggerScope, sym, sym->EnsurePosition(this), pnode->nop == knopConstDecl ? Js::DebuggerScopePropertyFlags_Const : Js::DebuggerScopePropertyFlags_None);
             }
-            else 
+            else
             {
                 TrackRegisterPropertyForDebugger(debuggerScope, sym, funcInfo, pnode->nop == knopConstDecl ? Js::DebuggerScopePropertyFlags_Const : Js::DebuggerScopePropertyFlags_None);
             }
@@ -1169,7 +1175,7 @@ void EmitAssignmentToFuncName(ParseNode *pnodeFnc, ByteCodeGenerator *byteCodeGe
             {
                 byteCodeGenerator->EmitPropStore(pnodeFnc->location, sym, nullptr, funcInfoParent);
             }
-            else
+            else if (!sym->GetIsBlockVar() || sym->HasRealBlockVarRef() || sym->GetScope()->GetIsObject())
             {
                 byteCodeGenerator->EmitLocalPropInit(pnodeFnc->location, sym, funcInfoParent);
             }
@@ -1328,7 +1334,13 @@ void ByteCodeGenerator::DefineUserVars(FuncInfo *funcInfo)
                 // so find the right symbol. (We'll still assign the RHS value to the catch object symbol.)
                 // This also applies to a var declaration in the same scope as a let declaration.
 #if DBG
-                if (!sym->GetIsCatch())
+                if (sym->GetIsArguments())
+                {
+                    // There is a block scoped var named arguments
+                    Assert(!funcInfo->GetHasArguments());
+                    continue;
+                }
+                else if (!sym->GetIsCatch())
                 {
                     // Assert that catch cannot be at function scope and let and var at function scope is redeclaration error.
                     Assert(funcInfo->bodyScope != sym->GetScope());
@@ -1385,26 +1397,21 @@ void ByteCodeGenerator::DefineUserVars(FuncInfo *funcInfo)
                     if ((!sym->GetHasInit() && !sym->IsInSlot(funcInfo)) ||
                         (funcInfo->bodyScope->GetIsObject() && !funcInfo->GetHasCachedScope()))
                     {
-                        // If the  current symbol is the duplicate arguments symbol created in the body for split
-                        // scope then load undef only if the arguments symbol is used in the body.
-                        if (!funcInfo->IsInnerArgumentsSymbol(sym) || funcInfo->GetHasArguments())
+                        Js::RegSlot reg = sym->GetLocation();
+                        if (reg == Js::Constants::NoRegister)
                         {
-                            Js::RegSlot reg = sym->GetLocation();
-                            if (reg == Js::Constants::NoRegister)
-                            {
-                                Assert(sym->IsInSlot(funcInfo));
-                                reg = funcInfo->AcquireTmpRegister();
-                            }
-                            this->m_writer.Reg1(Js::OpCode::LdUndef, reg);
-                            this->EmitLocalPropInit(reg, sym, funcInfo);
-
-                            if (ShouldTrackDebuggerMetadata() && !sym->GetHasInit() && !sym->IsInSlot(funcInfo))
-                            {
-                                byteCodeFunction->InsertSymbolToRegSlotList(sym->GetName(), reg, funcInfo->varRegsCount);
-                            }
-
-                            funcInfo->ReleaseTmpRegister(reg);
+                            Assert(sym->IsInSlot(funcInfo));
+                            reg = funcInfo->AcquireTmpRegister();
                         }
+                        this->m_writer.Reg1(Js::OpCode::LdUndef, reg);
+                        this->EmitLocalPropInit(reg, sym, funcInfo);
+
+                        if (ShouldTrackDebuggerMetadata() && !sym->GetHasInit() && !sym->IsInSlot(funcInfo))
+                        {
+                            byteCodeFunction->InsertSymbolToRegSlotList(sym->GetName(), reg, funcInfo->varRegsCount);
+                        }
+
+                        funcInfo->ReleaseTmpRegister(reg);
                     }
                 }
                 else if (ShouldTrackDebuggerMetadata())
@@ -1417,7 +1424,7 @@ void ByteCodeGenerator::DefineUserVars(FuncInfo *funcInfo)
                             byteCodeFunction->InsertSymbolToRegSlotList(sym->GetName(), reg, funcInfo->varRegsCount);
                         }
                     }
-                }
+                }  
                 sym->SetHasInit(TRUE);
             }
         }
@@ -1534,9 +1541,9 @@ void ByteCodeGenerator::EmitScopeObjectInit(FuncInfo *funcInfo)
 
     // Create and fill the array of local property ID's.
     // They all have slots assigned to them already (if they need them): see StartEmitFunction.
-    
-    Js::PropertyIdArray *propIds = funcInfo->GetParsedFunctionBody()->AllocatePropertyIdArrayForFormals(extraAlloc, slotCount);
-    
+
+    Js::PropertyIdArray *propIds = funcInfo->GetParsedFunctionBody()->AllocatePropertyIdArrayForFormals(extraAlloc, slotCount, Js::ActivationObjectEx::ExtraSlotCount());
+
     ParseNode *pnodeFnc = funcInfo->root;
     ParseNode *pnode;
     Symbol *sym;
@@ -1660,7 +1667,7 @@ void ByteCodeGenerator::EmitScopeObjectInit(FuncInfo *funcInfo)
     }
     else
     {
-        Assert(!currentScope->GetCanMergeWithBodyScope());
+        Assert(!funcInfo->IsBodyAndParamScopeMerged());
     }
 
     if (funcInfo->thisScopeSlot != Js::Constants::NoRegister)
@@ -1688,7 +1695,7 @@ void ByteCodeGenerator::EmitScopeObjectInit(FuncInfo *funcInfo)
     slots[3] = funcInfo->GetParsedFunctionBody()->NewObjectLiteral();
 
     propIds->hasNonSimpleParams = funcInfo->root->sxFnc.HasNonSimpleParameterList();
-    
+
     funcInfo->GetParsedFunctionBody()->SetHasCachedScopePropIds(true);
 }
 
@@ -1765,7 +1772,8 @@ void ByteCodeGenerator::InitScopeSlotArray(FuncInfo * funcInfo)
 {
     // Record slots info for ScopeSlots/ScopeObject.
     uint scopeSlotCount = funcInfo->bodyScope->GetScopeSlotCount();
-    Assert(funcInfo->paramScope == nullptr || funcInfo->paramScope->GetScopeSlotCount() == 0 || !funcInfo->paramScope->GetCanMergeWithBodyScope());
+    bool isSplitScope = !funcInfo->IsBodyAndParamScopeMerged();
+    Assert(funcInfo->paramScope == nullptr || funcInfo->paramScope->GetScopeSlotCount() == 0 || isSplitScope);
     uint scopeSlotCountForParamScope = funcInfo->paramScope != nullptr ? funcInfo->paramScope->GetScopeSlotCount() : 0;
 
     if (scopeSlotCount == 0 && scopeSlotCountForParamScope == 0)
@@ -1807,41 +1815,36 @@ void ByteCodeGenerator::InitScopeSlotArray(FuncInfo * funcInfo)
         {
             if (sym->NeedsSlotAlloc(funcInfo))
             {
-                if (funcInfo->IsInnerArgumentsSymbol(sym) && !funcInfo->GetHasArguments())
-                {
-                    // In split scope case we have a duplicate symbol for arguments in the body (innerArgumentsSymbol).
-                    // But if arguments is not referenced in the body we don't have to allocate scope slot for it.
-                    // If we allocate one, then the debugger will assume that the arguments symbol is there and skip creating the fake one.
-                }
-                else
-                {
                     // All properties should get correct propertyId here.
                     Assert(sym->HasScopeSlot()); // We can't allocate scope slot now. Any symbol needing scope slot must have allocated it before this point.
                     setPropertyIdForScopeSlotArray(sym->GetScopeSlot(), sym->EnsurePosition(funcInfo));
-                }
             }
         };
 
         funcInfo->GetBodyScope()->ForEachSymbol(setPropIdsForScopeSlotArray);
 
-        if (funcInfo->thisScopeSlot != Js::Constants::NoRegister)
+        // In case of split scope these symbols belong to the param scope not body scope
+        if (!isSplitScope)
         {
-            setPropertyIdForScopeSlotArray(funcInfo->thisScopeSlot, Js::PropertyIds::_lexicalThisSlotSymbol);
-        }
+            if (funcInfo->thisScopeSlot != Js::Constants::NoRegister)
+            {
+                setPropertyIdForScopeSlotArray(funcInfo->thisScopeSlot, Js::PropertyIds::_lexicalThisSlotSymbol);
+            }
 
-        if (funcInfo->newTargetScopeSlot != Js::Constants::NoRegister)
-        {
-            setPropertyIdForScopeSlotArray(funcInfo->newTargetScopeSlot, Js::PropertyIds::_lexicalNewTargetSymbol);
-        }
+            if (funcInfo->newTargetScopeSlot != Js::Constants::NoRegister)
+            {
+                setPropertyIdForScopeSlotArray(funcInfo->newTargetScopeSlot, Js::PropertyIds::_lexicalNewTargetSymbol);
+            }
 
-        if (funcInfo->superScopeSlot != Js::Constants::NoRegister)
-        {
-            setPropertyIdForScopeSlotArray(funcInfo->superScopeSlot, Js::PropertyIds::_superReferenceSymbol);
-        }
+            if (funcInfo->superScopeSlot != Js::Constants::NoRegister)
+            {
+                setPropertyIdForScopeSlotArray(funcInfo->superScopeSlot, Js::PropertyIds::_superReferenceSymbol);
+            }
 
-        if (funcInfo->superCtorScopeSlot != Js::Constants::NoRegister)
-        {
-            setPropertyIdForScopeSlotArray(funcInfo->superCtorScopeSlot, Js::PropertyIds::_superCtorReferenceSymbol);
+            if (funcInfo->superCtorScopeSlot != Js::Constants::NoRegister)
+            {
+                setPropertyIdForScopeSlotArray(funcInfo->superCtorScopeSlot, Js::PropertyIds::_superCtorReferenceSymbol);
+            }
         }
 
 #if DEBUG
@@ -2014,7 +2017,7 @@ void ByteCodeGenerator::LoadAllConstants(FuncInfo *funcInfo)
         uint count = funcInfo->inArgsCount + (funcInfo->root->sxFnc.pnodeRest != nullptr ? 1 : 0) - 1;
         if (count != 0)
         {
-            Js::PropertyIdArray *propIds = RecyclerNewPlus(scriptContext->GetRecycler(), count * sizeof(Js::PropertyId), Js::PropertyIdArray, count);
+            Js::PropertyIdArray *propIds = RecyclerNewPlus(scriptContext->GetRecycler(), count * sizeof(Js::PropertyId), Js::PropertyIdArray, count, 0);
 
             GetFormalArgsArray(this, funcInfo, propIds);
             byteCodeFunction->SetPropertyIdsOfFormals(propIds);
@@ -2113,16 +2116,31 @@ void ByteCodeGenerator::LoadThisObject(FuncInfo *funcInfo, bool thisLoadedFromPa
 {
     if (this->scriptContext->GetConfig()->IsES6ClassAndExtendsEnabled() && funcInfo->IsClassConstructor())
     {
-        // Derived class constructors initialize 'this' to be Undecl
+        // Derived class constructors initialize 'this' to be Undecl except "extends null" cases
         //   - we'll check this value during a super call and during 'this' access
-        // Base class constructors initialize 'this' to a new object using new.target
+        //
+        // Base class constructors or "extends null" cases initialize 'this' to a new object using new.target
         if (funcInfo->IsBaseClassConstructor())
         {
             EmitBaseClassConstructorThisObject(funcInfo);
         }
         else
         {
-            this->m_writer.Reg1(Js::OpCode::InitUndecl, funcInfo->thisPointerRegister);
+            Js::ByteCodeLabel thisLabel = this->Writer()->DefineLabel();
+            Js::ByteCodeLabel skipLabel = this->Writer()->DefineLabel();
+
+            Js::RegSlot tmpReg = funcInfo->AcquireTmpRegister();
+            this->Writer()->Reg1(Js::OpCode::LdFuncObj, tmpReg);
+            this->Writer()->BrReg1(Js::OpCode::BrOnBaseConstructorKind, thisLabel, tmpReg);  // branch when [[ConstructorKind]]=="base"
+            funcInfo->ReleaseTmpRegister(tmpReg);
+
+            this->m_writer.Reg1(Js::OpCode::InitUndecl, funcInfo->thisPointerRegister);  // not "extends null" case
+            this->Writer()->Br(Js::OpCode::Br, skipLabel);
+
+            this->Writer()->MarkLabel(thisLabel);
+            EmitBaseClassConstructorThisObject(funcInfo);  // "extends null" case
+
+            this->Writer()->MarkLabel(skipLabel);
         }
     }
     else if (!funcInfo->IsGlobalFunction() || (this->flags & fscrEval))
@@ -2322,7 +2340,7 @@ void ByteCodeGenerator::EmitSuperCall(FuncInfo* funcInfo, ParseNode* pnode, BOOL
     }
 
     // We already know pnode->sxCall.pnodeTarget->nop is super but we can't use the super register in case
-    // this is an eval and we will load super dynamically from the scope using ScopedLdSuper.
+    // this is an eval and we will load super dynamically from the scope using ScopedLdHomeObj.
     // That means we'll have to rely on the location of the call target to be sure.
     // We have to make sure to allocate the location for the node now, before we try to branch on it.
     Emit(pnode->sxCall.pnodeTarget, this, funcInfo, false, /*isConstructorCall*/ true); // reuse isConstructorCall ("new super()" is illegal)
@@ -2352,7 +2370,8 @@ void ByteCodeGenerator::EmitSuperCall(FuncInfo* funcInfo, ParseNode* pnode, BOOL
     Js::ByteCodeLabel useSuperCallResultLabel = this->Writer()->DefineLabel();
     Js::ByteCodeLabel doneLabel = this->Writer()->DefineLabel();
 
-    this->Writer()->BrReg1(Js::OpCode::BrOnClassConstructor, useNewTargetForThisLabel, pnode->sxCall.pnodeTarget->location);
+    Js::RegSlot tmpReg = this->EmitLdObjProto(Js::OpCode::LdFuncObjProto, pnode->sxCall.pnodeTarget->location, funcInfo);
+    this->Writer()->BrReg1(Js::OpCode::BrOnClassConstructor, useNewTargetForThisLabel, tmpReg);
 
     this->Writer()->Reg2(Js::OpCode::NewScObjectNoCtorFull, thisForSuperCall, funcInfo->newTargetRegister);
     this->Writer()->Br(Js::OpCode::Br, makeCallLabel);
@@ -2410,12 +2429,6 @@ void ByteCodeGenerator::EmitClassConstructorEndCode(FuncInfo *funcInfo)
         EmitScopeSlotLoadThis(funcInfo, funcInfo->thisPointerRegister);
         this->Writer()->Reg2(Js::OpCode::Ld_A, ByteCodeGenerator::ReturnRegister, funcInfo->thisPointerRegister);
     }
-    else
-    {
-        // This is the case where we don't have any references to this or super in the constructor or any nested lambda functions.
-        // We know 'this' must be undecl so let's just emit the ReferenceError as part of the fallthrough.
-        EmitUseBeforeDeclarationRuntimeError(this, ByteCodeGenerator::ReturnRegister);
-    }
 }
 
 void ByteCodeGenerator::EmitBaseClassConstructorThisObject(FuncInfo *funcInfo)
@@ -2436,7 +2449,7 @@ void ByteCodeGenerator::EmitInternalScopedSlotLoad(FuncInfo *funcInfo, Js::RegSl
     }
     else
     {
-        scope = funcInfo->GetBodyScope();
+        scope = funcInfo->IsBodyAndParamScopeMerged() ? funcInfo->GetBodyScope() : funcInfo->GetParamScope();
 
         EmitInternalScopedSlotLoad(funcInfo, scope, -1, slot, symbolRegister, chkUndecl);
     }
@@ -2447,6 +2460,17 @@ void ByteCodeGenerator::EmitInternalScopedSlotLoad(FuncInfo *funcInfo, Scope *sc
     Assert(slot != Js::Constants::NoProperty);
     Js::ProfileId profileId = funcInfo->FindOrAddSlotProfileId(scope, symbolRegister);
     Js::OpCode opcode;
+
+    // This method is used only for loading the special symbols. If this is already param scope then we don't have to do anything.
+    // Else, for split scope, we have to get the special symbols from the param scope.
+    if (scope->GetScopeType() == ScopeType_Parameter)
+    {
+        Assert(!scope->GetFunc()->IsBodyAndParamScopeMerged());
+    }
+    else if (!scope->GetFunc()->IsBodyAndParamScopeMerged())
+    {
+        scope = scope->GetFunc()->GetParamScope();
+    }
 
     Js::RegSlot scopeLocation = scope->GetLocation();
     opcode = this->GetLdSlotOp(scope, envIndex, scopeLocation, funcInfo);
@@ -2487,6 +2511,17 @@ void ByteCodeGenerator::EmitInternalScopedSlotStore(FuncInfo *funcInfo, Js::RegS
     else
     {
         scope = funcInfo->GetBodyScope();
+    }
+
+    // This method is used only for storing values to the special symbols. If this is already param scope then we don't have to do anything.
+    // Else, for split scope, we have to get the special symbols from the param scope.
+    if (scope->GetScopeType() == ScopeType_Parameter)
+    {
+        Assert(!scope->GetFunc()->IsBodyAndParamScopeMerged());
+    }
+    else if (!scope->GetFunc()->IsBodyAndParamScopeMerged())
+    {
+        scope = scope->GetFunc()->GetParamScope();
     }
 
     Js::RegSlot scopeLocation = scope->GetLocation();
@@ -2539,13 +2574,28 @@ void ByteCodeGenerator::GetEnclosingNonLambdaScope(FuncInfo *funcInfo, Scope * &
     envIndex = -1;
     for (scope = GetCurrentScope(); scope; scope = scope->GetEnclosingScope())
     {
-        if (scope->GetMustInstantiate() && scope->GetFunc() != funcInfo)
+        FuncInfo* scopeFuncInfo = scope->GetFunc();
+        if (scope->GetMustInstantiate() && scopeFuncInfo != funcInfo)
         {
             envIndex++;
         }
-        if (((scope == scope->GetFunc()->GetBodyScope() || scope == scope->GetFunc()->GetParamScope()) && !scope->GetFunc()->IsLambda()) || scope->IsGlobalEvalBlockScope())
+        if (scope->IsGlobalEvalBlockScope())
         {
             break;
+        }
+        else if (!scopeFuncInfo->IsLambda())
+        {
+            // This method is used only for working with the special scope slots like this, super or new.target captured
+            // from the parent function. In case of split scope all these symbols should be loaded from the param scope.
+            if (scope == scopeFuncInfo->GetParamScope())
+            {
+                Assert(!scopeFuncInfo->IsBodyAndParamScopeMerged());
+                break;
+            }
+            else if (scope == scopeFuncInfo->GetBodyScope() && scopeFuncInfo->IsBodyAndParamScopeMerged())
+            {
+                break;
+            }
         }
     }
 }
@@ -2604,17 +2654,30 @@ void ByteCodeGenerator::EmitLoadFormalIntoRegister(ParseNode *pnodeFormal, Js::R
             // Transfer to the frame object, etc., if necessary.
             this->EmitLocalPropInit(formal->GetLocation(), formal, funcInfo);
         }
-
-        if (ShouldTrackDebuggerMetadata() && !formal->IsInSlot(funcInfo))
-        {
-            Assert(!formal->GetHasInit());
-            funcInfo->GetParsedFunctionBody()->InsertSymbolToRegSlotList(formal->GetName(), formal->GetLocation(), funcInfo->varRegsCount);
-        }
     }
 }
 
 void ByteCodeGenerator::HomeArguments(FuncInfo *funcInfo)
 {
+    if (ShouldTrackDebuggerMetadata())
+    {
+        // Add formals to the debugger propertyidcontainer for reg slots
+        auto addFormalsToPropertyIdContainer = [funcInfo](ParseNode *pnodeFormal)
+        {
+            if (pnodeFormal->IsVarLetOrConst())
+            {
+                Symbol* formal = pnodeFormal->sxVar.sym;
+                if (!formal->IsInSlot(funcInfo))
+                {
+                    Assert(!formal->GetHasInit());
+                    funcInfo->GetParsedFunctionBody()->InsertSymbolToRegSlotList(formal->GetName(), formal->GetLocation(), funcInfo->varRegsCount);
+                }
+            }
+        };
+
+        MapFormals(funcInfo->root, addFormalsToPropertyIdContainer);
+    }
+
     // Transfer formal parameters to their home locations on the local frame.
     if (funcInfo->GetHasArguments())
     {
@@ -2708,7 +2771,8 @@ void ByteCodeGenerator::EmitFunctionBody(FuncInfo *funcInfo)
                     Assert(decl);
                     if (PHASE_TRACE(Js::DelayCapturePhase, funcInfo->byteCodeFunction))
                     {
-                        Output::Print(_u("--- DelayCapture: Committed symbol '%s' to slot.\n"), sym->GetName());
+                        Output::Print(_u("--- DelayCapture: Committed symbol '%s' to slot.\n"),
+                            sym->GetName().GetBuffer());
                         Output::Flush();
                     }
                     // REVIEW[ianhall]: HACK to work around this causing an error due to sym not yet being initialized
@@ -2800,7 +2864,7 @@ void ByteCodeGenerator::PopulateFormalsScope(uint beginOffset, FuncInfo *funcInf
                 debuggerScope->SetBegin(beginOffset);
             }
 
-            debuggerScope->AddProperty(pnodeArg->sxVar.sym->GetLocation(), pnodeArg->sxVar.sym->EnsurePosition(funcInfo), Js::DebuggerScopePropertyFlags_None);
+            InsertPropertyToDebuggerScope(funcInfo, debuggerScope, pnodeArg->sxVar.sym);
         }
     };
 
@@ -2809,7 +2873,29 @@ void ByteCodeGenerator::PopulateFormalsScope(uint beginOffset, FuncInfo *funcInf
 
     if (debuggerScope != nullptr)
     {
+        if (!funcInfo->GetParsedFunctionBody()->IsParamAndBodyScopeMerged())
+        {
+            InsertPropertyToDebuggerScope(funcInfo, debuggerScope, funcInfo->GetArgumentsSymbol());
+        }
+
         RecordEndScopeObject(pnode);
+    }
+}
+
+void ByteCodeGenerator::InsertPropertyToDebuggerScope(FuncInfo* funcInfo, Js::DebuggerScope* debuggerScope, Symbol* sym)
+{
+    if (sym)
+    {
+        Js::FunctionBody* funcBody = funcInfo->GetParsedFunctionBody();
+        Js::DebuggerScopePropertyFlags flag = Js::DebuggerScopePropertyFlags_None;
+        Js::RegSlot location = sym->GetLocation();
+        if (ShouldTrackDebuggerMetadata() && !funcInfo->IsBodyAndParamScopeMerged() && funcInfo->bodyScope->FindLocalSymbol(sym->GetName()) != nullptr)
+        {
+            flag |= Js::DebuggerScopePropertyFlags_HasDuplicateInBody;
+            location = funcBody->MapRegSlot(location);
+        }
+
+        debuggerScope->AddProperty(location, sym->EnsurePosition(funcInfo), flag);
     }
 }
 
@@ -2988,6 +3074,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
         {
             deferParseFunction->BuildDeferredStubs(funcInfo->root);
         }
+        Assert(!deferParseFunction->IsFunctionBody() || deferParseFunction->GetFunctionBody()->GetByteCode() != nullptr);
         return;
     }
 
@@ -2999,6 +3086,41 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
 
     try
     {
+        if (!funcInfo->IsGlobalFunction())
+        {
+            // Note: Do not set the stack nested func flag if the function has been redeferred and recompiled.
+            // In that case the flag already has the value we want.
+            if (CanStackNestedFunc(funcInfo, true) && byteCodeFunction->GetCompileCount() == 0)
+            {
+#if DBG
+                byteCodeFunction->SetCanDoStackNestedFunc();
+#endif
+                if (funcInfo->root->sxFnc.astSize <= PnFnc::MaxStackClosureAST)
+                {
+                    byteCodeFunction->SetStackNestedFunc(true);
+                }
+            }
+        }
+
+        if (byteCodeFunction->DoStackNestedFunc())
+        {
+            uint nestedCount = byteCodeFunction->GetNestedCount();
+            for (uint i = 0; i < nestedCount; i++)
+            {
+                Js::FunctionProxy * nested = byteCodeFunction->GetNestedFunctionProxy(i);
+                if (nested->IsFunctionBody())
+                {
+                    nested->GetFunctionBody()->SetStackNestedFuncParent(byteCodeFunction->GetFunctionInfo());
+                }
+            }
+        }
+
+        if (byteCodeFunction->GetByteCode() != nullptr)
+        {
+            // Previously compiled function nested within a re-deferred and re-compiled function.
+            return;
+        }
+
         // Bug : 301517
         // In the debug mode the hasOnlyThis optimization needs to be disabled, since user can break in this function
         // and do operation on 'this' and its property, which may not be defined yet.
@@ -3042,20 +3164,6 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             }
         }
 
-        if (!funcInfo->IsGlobalFunction())
-        {
-            if (CanStackNestedFunc(funcInfo, true))
-            {
-#if DBG
-                byteCodeFunction->SetCanDoStackNestedFunc();
-#endif
-                if (funcInfo->root->sxFnc.astSize <= PnFnc::MaxStackClosureAST)
-                {
-                    byteCodeFunction->SetStackNestedFunc(true);
-                }
-            }
-        }
-
         InitScopeSlotArray(funcInfo);
         FinalizeRegisters(funcInfo, byteCodeFunction);
         DebugOnly(Js::RegSlot firstTmpReg = funcInfo->varRegsCount);
@@ -3095,7 +3203,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
 
         byteCodeFunction->AllocateLiteralRegexArray();
         m_callSiteId = 0;
-        m_writer.Begin(this, byteCodeFunction, alloc, this->DoJitLoopBodies(funcInfo), funcInfo->hasLoop);
+        m_writer.Begin(byteCodeFunction, alloc, this->DoJitLoopBodies(funcInfo), funcInfo->hasLoop, this->IsInDebugMode());
         this->PushFuncInfo(_u("EmitOneFunction"), funcInfo);
 
         this->inPrologue = true;
@@ -3108,7 +3216,6 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             m_writer.Empty(Js::OpCode::ChkNewCallFlag);
         }
 
-        Scope* currentScope = funcInfo->GetCurrentChildScope();
         Scope* paramScope = funcInfo->GetParamScope();
         Scope* bodyScope = funcInfo->GetBodyScope();
 
@@ -3116,7 +3223,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
         LoadAllConstants(funcInfo);
         HomeArguments(funcInfo);
 
-        if (!currentScope->GetCanMergeWithBodyScope())
+        if (!funcInfo->IsBodyAndParamScopeMerged())
         {
             byteCodeFunction->SetParamAndBodyScopeNotMerged();
 
@@ -3130,14 +3237,21 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             byteCodeFunction->SetHasRestParameter();
         }
 
+        if (funcInfo->IsGlobalFunction())
+        {
+            EnsureNoRedeclarations(pnode->sxFnc.pnodeScopes, funcInfo);
+        }
+
+        ::BeginEmitBlock(pnode->sxFnc.pnodeScopes, this, funcInfo);
+
         if (funcInfo->thisScopeSlot != Js::Constants::NoRegister && !(funcInfo->IsLambda() || (funcInfo->IsGlobalFunction() && this->flags & fscrEval)))
         {
             EmitInitCapturedThis(funcInfo, funcInfo->bodyScope);
         }
 
-        // Any function with a super reference or an eval call inside a class method needs to load super,
-        if ((funcInfo->HasSuperReference() || (funcInfo->GetCallsEval() && funcInfo->root->sxFnc.IsClassMember()))
-            // unless we are already inside the 'global' scope inside an eval (in which case 'ScopedLdSuper' is emitted at every 'super' reference).
+        // Any function with a super reference or an eval call inside a method or a constructor needs to load super,
+        if ((funcInfo->HasSuperReference() || (funcInfo->GetCallsEval() && (funcInfo->root->sxFnc.IsMethod() || funcInfo->root->sxFnc.IsConstructor())))
+            // unless we are already inside the 'global' scope inside an eval (in which case 'ScopedLdHomeObj' is emitted at every 'super' reference).
             && !((GetFlags() & fscrEval) && funcInfo->IsGlobalFunction()))
         {
             if (funcInfo->IsLambda())
@@ -3162,15 +3276,15 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
                     // lambda in non-eval global scope
                     m_writer.Reg1(Js::OpCode::LdUndef, funcInfo->superRegister);
                 }
-                // lambda in eval global scope: ScopedLdSuper will handle error throwing
+                // lambda in eval global scope: ScopedLdHomeObj will handle error throwing
             }
             else
             {
-                m_writer.Reg1(Js::OpCode::LdSuper, funcInfo->superRegister);
+                m_writer.Reg1(Js::OpCode::LdHomeObj, funcInfo->superRegister);
 
                 if (funcInfo->superCtorRegister != Js::Constants::NoRegister) // super() is allowed only in derived class constructors
                 {
-                    m_writer.Reg1(Js::OpCode::LdSuperCtor, funcInfo->superCtorRegister);
+                    m_writer.Reg1(Js::OpCode::LdFuncObj, funcInfo->superCtorRegister);
                 }
 
                 if (!funcInfo->IsGlobalFunction())
@@ -3205,7 +3319,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             EmitInitCapturedNewTarget(funcInfo, bodyScope);
         }
 
-        // We don't want to load super if we are already in an eval. ScopedLdSuper will take care of loading super in that case.
+        // We don't want to load super if we are already in an eval. ScopedLdHomeObj will take care of loading super in that case.
         if (!(GetFlags() & fscrEval) && !bodyScope->GetIsObject())
         {
             if (funcInfo->superScopeSlot != Js::Constants::NoRegister)
@@ -3219,26 +3333,6 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             }
         }
 
-        if (byteCodeFunction->DoStackNestedFunc())
-        {
-            uint nestedCount = byteCodeFunction->GetNestedCount();
-            for (uint i = 0; i < nestedCount; i++)
-            {
-                Js::FunctionProxy * nested = byteCodeFunction->GetNestedFunc(i);
-                if (nested->IsFunctionBody())
-                {
-                    nested->GetFunctionBody()->SetStackNestedFuncParent(byteCodeFunction);
-                }
-            }
-        }
-
-        if (funcInfo->IsGlobalFunction())
-        {
-            EnsureNoRedeclarations(pnode->sxFnc.pnodeScopes, funcInfo);
-        }
-
-        ::BeginEmitBlock(pnode->sxFnc.pnodeScopes, this, funcInfo);
-
         DefineLabels(funcInfo);
 
         if (pnode->sxFnc.HasNonSimpleParameterList())
@@ -3247,7 +3341,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
 
             EmitDefaultArgs(funcInfo, pnode);
 
-            if (!currentScope->GetCanMergeWithBodyScope())
+            if (!funcInfo->IsBodyAndParamScopeMerged())
             {
                 Assert(this->GetCurrentScope() == paramScope);
                 // Push the body scope
@@ -3259,8 +3353,6 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
                 this->Writer()->Empty(Js::OpCode::BeginBodyScope);
             }
         }
-
-        InitSpecialScopeSlots(funcInfo);
 
         // Emit all scope-wide function definitions before emitting function bodies
         // so that calls may reference functions they precede lexically.
@@ -3296,64 +3388,67 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
             pnode->sxFnc.pnodeRest->sxVar.sym->SetNeedDeclaration(false);
         }
 
-        if (paramScope && !paramScope->GetCanMergeWithBodyScope())
+        Js::RegSlot formalsUpperBound = Js::Constants::NoRegister; // Needed for tracking the last RegSlot in the param scope
+        if (!funcInfo->IsBodyAndParamScopeMerged())
         {
             // Emit bytecode to copy the initial values from param names to their corresponding body bindings.
             // We have to do this after the rest param is marked as false for need declaration.
+            Symbol* funcSym = funcInfo->root->sxFnc.GetFuncSymbol();
             paramScope->ForEachSymbol([&](Symbol* param) {
                 Symbol* varSym = funcInfo->GetBodyScope()->FindLocalSymbol(param->GetName());
-                Assert(varSym || pnode->sxFnc.pnodeName->sxVar.sym == param);
-                Assert(param->GetIsArguments() || param->IsInSlot(funcInfo));
-                if (param->GetIsArguments() && !funcInfo->GetHasArguments())
+                if ((funcSym == nullptr || funcSym != param)    // Do not copy the symbol over to body as the function expression symbol
+                                                                // is expected to stay inside the function expression scope
+                    && (varSym && varSym->GetSymbolType() == STVariable && (varSym->IsInSlot(funcInfo) || varSym->GetLocation() != Js::Constants::NoRegister)))
                 {
-                    // Do not copy the arguments to the body if it is not used
-                }
-                else if (varSym && varSym->GetSymbolType() == STVariable && (varSym->IsInSlot(funcInfo) || varSym->GetLocation() != Js::Constants::NoRegister))
-                {
-                    // Simulating EmitPropLoad here. We can't directly call the method as we have to use the param scope specifically.
-                    // Walking the scope chain is not possible at this time.
-                    Js::RegSlot tempReg = funcInfo->AcquireTmpRegister();
-                    Js::PropertyId slot = param->EnsureScopeSlot(funcInfo);
-                    Js::ProfileId profileId = funcInfo->FindOrAddSlotProfileId(paramScope, slot);
-                    Js::OpCode op = paramScope->GetIsObject() ? Js::OpCode::LdParamObjSlot : Js::OpCode::LdParamSlot;
-                    slot = slot + (paramScope->GetIsObject() ? 0 : Js::ScopeSlots::FirstSlotIndex);
-
-                    this->m_writer.SlotI1(op, tempReg, slot, profileId);
-
-                    if (ShouldTrackDebuggerMetadata() && !varSym->GetIsArguments() && !varSym->IsInSlot(funcInfo))
+                    if (varSym->GetSymbolType() == STVariable && (varSym->IsInSlot(funcInfo) || varSym->GetLocation() != Js::Constants::NoRegister))
                     {
-                        byteCodeFunction->InsertSymbolToRegSlotList(varSym->GetName(), varSym->GetLocation(), funcInfo->varRegsCount);
-                    }
+                        if (!varSym->GetNeedDeclaration())
+                        {
+                            if (param->IsInSlot(funcInfo))
+                            {
+                                // Simulating EmitPropLoad here. We can't directly call the method as we have to use the param scope specifically.
+                                // Walking the scope chain is not possible at this time.
+                                Js::RegSlot tempReg = funcInfo->AcquireTmpRegister();
+                                Js::PropertyId slot = param->EnsureScopeSlot(funcInfo);
+                                Js::ProfileId profileId = funcInfo->FindOrAddSlotProfileId(paramScope, slot);
+                                Js::OpCode op = paramScope->GetIsObject() ? Js::OpCode::LdParamObjSlot : Js::OpCode::LdParamSlot;
+                                slot = slot + (paramScope->GetIsObject() ? 0 : Js::ScopeSlots::FirstSlotIndex);
 
-                    this->EmitPropStore(tempReg, varSym, varSym->GetPid(), funcInfo);
-                    funcInfo->ReleaseTmpRegister(tempReg);
+                                this->m_writer.SlotI1(op, tempReg, slot, profileId);
+
+                                this->EmitPropStore(tempReg, varSym, varSym->GetPid(), funcInfo);
+                                funcInfo->ReleaseTmpRegister(tempReg);
+                            }
+                            else if (param->GetLocation() != Js::Constants::NoRegister)
+                            {
+                                this->EmitPropStore(param->GetLocation(), varSym, varSym->GetPid(), funcInfo);
+                            }
+                            else
+                            {
+                                Assert(param->GetIsArguments() && !funcInfo->GetHasArguments());
+                            }
+                        }
+                        else
+                        {
+                            // There is a let redeclaration of arguments symbol. Any other var will cause a
+                            // re-declaration error.
+                            Assert(param->GetIsArguments());
+                        }
+                    }
+                }
+
+                if (ShouldTrackDebuggerMetadata() && param->GetLocation() != Js::Constants::NoRegister)
+                {
+                    if (formalsUpperBound == Js::Constants::NoRegister || formalsUpperBound < param->GetLocation())
+                    {
+                        formalsUpperBound = param->GetLocation();
+                    }
                 }
             });
-
-            // In split scope as the body has a separate closure we have to copy the value of this and other special slots
-            // from param scope to the body scope
-            auto copySpecialSymbolsToBody = [this, funcInfo, paramScope] (Js::PropertyId src, Js::PropertyId dest)
-            {
-                if (dest != Js::Constants::NoProperty)
-                {
-                    Js::RegSlot tempReg = funcInfo->AcquireTmpRegister();
-                    Js::PropertyId slot = src;
-                    Js::ProfileId profileId = funcInfo->FindOrAddSlotProfileId(paramScope, slot);
-                    Js::OpCode op = paramScope->GetIsObject() ? Js::OpCode::LdParamObjSlot : Js::OpCode::LdParamSlot;
-                    slot = slot + (paramScope->GetIsObject() ? 0 : Js::ScopeSlots::FirstSlotIndex);
-
-                    this->m_writer.SlotI1(op, tempReg, slot, profileId);
-
-                    op = funcInfo->bodyScope->GetIsObject() ? Js::OpCode::StLocalObjSlot : Js::OpCode::StLocalSlot;
-                    slot = dest + (funcInfo->bodyScope->GetIsObject() ? 0 : Js::ScopeSlots::FirstSlotIndex);
-                    this->m_writer.SlotI1(op, tempReg, slot);
-                    funcInfo->ReleaseTmpRegister(tempReg);
-                }
-            };
-            copySpecialSymbolsToBody(funcInfo->innerThisScopeSlot, funcInfo->thisScopeSlot);
-            copySpecialSymbolsToBody(funcInfo->innerSuperScopeSlot, funcInfo->superScopeSlot);
-            copySpecialSymbolsToBody(funcInfo->innerSuperCtorScopeSlot, funcInfo->superCtorScopeSlot);
-            copySpecialSymbolsToBody(funcInfo->innerNewTargetScopeSlot, funcInfo->newTargetScopeSlot);
+        }
+        if (ShouldTrackDebuggerMetadata() && byteCodeFunction->GetPropertyIdOnRegSlotsContainer())
+        {
+            byteCodeFunction->GetPropertyIdOnRegSlotsContainer()->formalsUpperBound = formalsUpperBound;
         }
 
         if (pnode->sxFnc.pnodeBodyScope != nullptr)
@@ -3398,6 +3493,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
 
         byteCodeFunction->CheckAndSetVarCount(funcInfo->varRegsCount);
         byteCodeFunction->CheckAndSetOutParamMaxDepth(funcInfo->outArgsMaxDepth);
+        byteCodeFunction->SetForInLoopDepth(funcInfo->GetMaxForInLoopLevel());
 
         // Do a uint32 add just to verify that we haven't overflowed the reg slot type.
         UInt32Math::Add(funcInfo->varRegsCount, funcInfo->constRegsCount);
@@ -3460,6 +3556,7 @@ void ByteCodeGenerator::EmitOneFunction(ParseNode *pnode)
 
 
     byteCodeFunction->SetInitialDefaultEntryPoint();
+    byteCodeFunction->SetCompileCount(UInt32Math::Add(byteCodeFunction->GetCompileCount(), 1));
 
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
     if (byteCodeFunction->IsInDebugMode() != scriptContext->IsScriptContextInDebugMode()) // debug mode mismatch
@@ -3599,7 +3696,7 @@ void ByteCodeGenerator::EmitScopeList(ParseNode *pnode, ParseNode *breakOnBodySc
         switch (pnode->nop)
         {
         case knopFncDecl:
-#ifndef TEMP_DISABLE_ASMJS
+#ifdef ASMJS_PLAT
             if (pnode->sxFnc.GetAsmjsMode())
             {
                 Js::ExclusiveContext context(this, GetScriptContext());
@@ -3612,9 +3709,9 @@ void ByteCodeGenerator::EmitScopeList(ParseNode *pnode, ParseNode *breakOnBodySc
                 {
                     exit(JSERR_AsmJsCompileError);
                 }
-                else if (!(flags & fscrDeferFncParse))
+                else
                 {
-                    // If deferral is not allowed, throw and reparse everything with asm.js disabled.
+                    // if asm.js parse error happened, reparse with asm.js disabled.
                     throw Js::AsmJsParseException();
                 }
             }
@@ -3626,7 +3723,7 @@ void ByteCodeGenerator::EmitScopeList(ParseNode *pnode, ParseNode *breakOnBodySc
                 FuncInfo* funcInfo = pnode->sxFnc.funcInfo;
                 Scope* paramScope = funcInfo->GetParamScope();
 
-                if (paramScope && !paramScope->GetCanMergeWithBodyScope())
+                if (!funcInfo->IsBodyAndParamScopeMerged())
                 {
                     funcInfo->SetCurrentChildScope(paramScope);
                 }
@@ -3644,10 +3741,8 @@ void ByteCodeGenerator::EmitScopeList(ParseNode *pnode, ParseNode *breakOnBodySc
                     PushFuncInfo(_u("StartEmitFunction"), funcInfo);
                 }
 
-                if (paramScope && !paramScope->GetCanMergeWithBodyScope())
+                if (!funcInfo->IsBodyAndParamScopeMerged())
                 {
-                    // Before emitting the body scoped functions let us switch the special scope slot to use the body ones
-                    pnode->sxFnc.funcInfo->UseInnerSpecialScopeSlots();
                     this->EmitScopeList(pnode->sxFnc.pnodeBodyScope->sxBlock.pnodeScopes);
                 }
                 else
@@ -3658,7 +3753,7 @@ void ByteCodeGenerator::EmitScopeList(ParseNode *pnode, ParseNode *breakOnBodySc
                 this->EmitOneFunction(pnode);
                 this->EndEmitFunction(pnode);
 
-                Assert(pnode->sxFnc.pnodeBody == nullptr || funcInfo->GetCurrentChildScope() == funcInfo->GetBodyScope());
+                Assert(pnode->sxFnc.pnodeBody == nullptr || funcInfo->isReused || funcInfo->GetCurrentChildScope() == funcInfo->GetBodyScope());
                 funcInfo->SetCurrentChildScope(nullptr);
             }
             pnode = pnode->sxFnc.pnodeNext;
@@ -3698,7 +3793,9 @@ void EnsureFncDeclScopeSlot(ParseNode *pnodeFnc, FuncInfo *funcInfo)
     {
         Assert(pnodeFnc->sxFnc.pnodeName->nop == knopVarDecl);
         Symbol *sym = pnodeFnc->sxFnc.pnodeName->sxVar.sym;
-        if (sym)
+        // If this function is shadowing the arguments symbol in body then skip it.
+        // We will allocate scope slot for the arguments symbol during EmitLocalPropInit.
+        if (sym && !sym->GetIsArguments())
         {
             sym->EnsureScopeSlot(funcInfo);
         }
@@ -3777,45 +3874,34 @@ void ByteCodeGenerator::EnsureSpecialScopeSlots(FuncInfo* funcInfo, Scope* scope
     }
 }
 
-void ByteCodeGenerator::InitSpecialScopeSlots(FuncInfo* funcInfo)
-{
-    if (funcInfo->bodyScope->GetIsObject())
-    {
-        // In split scope make sure to do init fld for the duplicate special scope slots
-        if (funcInfo->innerThisScopeSlot != Js::Constants::NoProperty)
-        {
-            uint cacheId = funcInfo->FindOrAddInlineCacheId(funcInfo->bodyScope->GetLocation(), Js::PropertyIds::_lexicalThisSlotSymbol, false, true);
-            m_writer.ElementP(Js::OpCode::InitLocalFld, funcInfo->thisPointerRegister, cacheId);
-        }
-        if (funcInfo->innerSuperScopeSlot != Js::Constants::NoProperty)
-        {
-            uint cacheId = funcInfo->FindOrAddInlineCacheId(funcInfo->bodyScope->GetLocation(), Js::PropertyIds::_superReferenceSymbol, false, true);
-            m_writer.ElementP(Js::OpCode::InitLocalFld, funcInfo->superRegister, cacheId);
-        }
-        if (funcInfo->innerSuperCtorScopeSlot != Js::Constants::NoProperty)
-        {
-            uint cacheId = funcInfo->FindOrAddInlineCacheId(funcInfo->bodyScope->GetLocation(), Js::PropertyIds::_superCtorReferenceSymbol, false, true);
-            m_writer.ElementP(Js::OpCode::InitLocalFld, funcInfo->superCtorRegister, cacheId);
-        }
-        if (funcInfo->innerNewTargetScopeSlot != Js::Constants::NoProperty)
-        {
-            uint cacheId = funcInfo->FindOrAddInlineCacheId(funcInfo->bodyScope->GetLocation(), Js::PropertyIds::_lexicalNewTargetSymbol, false, true);
-            m_writer.ElementP(Js::OpCode::InitLocalFld, funcInfo->newTargetRegister, cacheId);
-        }
-    }
-}
-
 void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
 {
     Assert(pnodeFnc->nop == knopFncDecl || pnodeFnc->nop == knopProg);
 
     FuncInfo *funcInfo = pnodeFnc->sxFnc.funcInfo;
 
-    if (funcInfo->byteCodeFunction->IsFunctionParsed() &&
-        !(flags & (fscrEval | fscrImplicitThis | fscrImplicitParents)))
+    if (funcInfo->byteCodeFunction->IsFunctionParsed())
     {
-        // Only set the environment depth if it's truly known (i.e., not in eval or event handler).
-        funcInfo->GetParsedFunctionBody()->SetEnvDepth(this->envDepth);
+        if (!(flags & (fscrEval | fscrImplicitThis | fscrImplicitParents)))
+        {
+            // Only set the environment depth if it's truly known (i.e., not in eval or event handler).
+            funcInfo->GetParsedFunctionBody()->SetEnvDepth(this->envDepth);
+        }
+
+        if (pnodeFnc->sxFnc.FIBPreventsDeferral())
+        {
+            for (Scope *scope = this->currentScope; scope; scope = scope->GetEnclosingScope())
+            {
+                if (scope->GetScopeType() != ScopeType_FunctionBody && 
+                    scope->GetScopeType() != ScopeType_Global &&
+                    scope->GetScopeType() != ScopeType_GlobalEvalBlock &&
+                    scope->GetMustInstantiate())
+                {
+                    funcInfo->byteCodeFunction->SetAttributes((Js::FunctionInfo::Attributes)(funcInfo->byteCodeFunction->GetAttributes() & ~Js::FunctionInfo::Attributes::CanDefer));
+                    break;
+                }
+            }
+        }
     }
 
     if (funcInfo->GetCallsEval())
@@ -3840,7 +3926,7 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
         else
         {
             Symbol *sym = funcInfo->root->sxFnc.GetFuncSymbol();
-            if (funcInfo->paramScope->GetCanMergeWithBodyScope())
+            if (funcInfo->IsBodyAndParamScopeMerged())
             {
                 funcInfo->bodyScope->AddSymbol(sym);
             }
@@ -3871,7 +3957,7 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
             bodyScope->SetLocation(funcInfo->frameSlotsRegister);
         }
 
-        if (!paramScope->GetCanMergeWithBodyScope())
+        if (!funcInfo->IsBodyAndParamScopeMerged())
         {
             if (paramScope->GetIsObject())
             {
@@ -3891,8 +3977,12 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
                 !funcInfo->Escapes() &&
                 funcInfo->frameObjRegister != Js::Constants::NoRegister &&
                 !ApplyEnclosesArgs(pnodeFnc, this) &&
-                funcInfo->paramScope->GetCanMergeWithBodyScope() && // There is eval in the param scope
-                (PHASE_FORCE(Js::CachedScopePhase, funcInfo->byteCodeFunction) || !IsInDebugMode()));
+                funcInfo->IsBodyAndParamScopeMerged() && // There is eval in the param scope
+                (PHASE_FORCE(Js::CachedScopePhase, funcInfo->byteCodeFunction) || !IsInDebugMode())
+#if ENABLE_TTD
+                && !funcInfo->GetParsedFunctionBody()->GetScriptContext()->GetThreadContext()->IsRuntimeInTTDMode()
+#endif
+            );
 
             if (funcInfo->GetHasCachedScope())
             {
@@ -4017,8 +4107,7 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
                     {
                         sym = funcInfo->bodyScope->FindLocalSymbol(sym->GetName());
                     }
-                    if (sym->GetSymbolType() == STVariable && !sym->GetIsArguments()
-                        && (!funcInfo->IsInnerArgumentsSymbol(sym) || funcInfo->GetHasArguments()))
+                    if (sym->GetSymbolType() == STVariable && !sym->GetIsArguments())
                     {
                         sym->EnsureScopeSlot(funcInfo);
                     }
@@ -4049,8 +4138,7 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
                     {
                         sym = funcInfo->bodyScope->FindLocalSymbol(sym->GetName());
                     }
-                    if (sym->GetSymbolType() == STVariable && sym->NeedsSlotAlloc(funcInfo) && !sym->GetIsArguments()
-                        && (!funcInfo->IsInnerArgumentsSymbol(sym) || funcInfo->GetHasArguments()))
+                    if (sym->GetSymbolType() == STVariable && sym->NeedsSlotAlloc(funcInfo) && !sym->GetIsArguments())
                     {
                         sym->EnsureScopeSlot(funcInfo);
                     }
@@ -4072,15 +4160,14 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
             MapFormals(pnodeFnc, ensureScopeSlot);
             MapFormalsFromPattern(pnodeFnc, ensureScopeSlot);
 
-            if (!paramScope->GetCanMergeWithBodyScope())
+            if (funcInfo->GetHasArguments())
             {
                 sym = funcInfo->GetArgumentsSymbol();
-                if (sym && funcInfo->GetHasArguments())
-                {
-                    // There is no eval so the arguments may be captured in a lambda. In split scope case
-                    // we have to make sure the param arguments is also put in a slot.
-                    sym->EnsureScopeSlot(funcInfo);
-                }
+                Assert(sym);
+
+                // There is no eval so the arguments may be captured in a lambda.
+                // But we cannot relay on slots getting allocated while the lambda is emitted as the function body may be reparsed.
+                sym->EnsureScopeSlot(funcInfo);
             }
 
             if (pnodeFnc->sxFnc.pnodeBody)
@@ -4090,17 +4177,16 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
             }
         }
 
-        if (!paramScope->GetCanMergeWithBodyScope() && bodyScope->GetScopeSlotCount() == 0 && !bodyScope->GetHasOwnLocalInClosure())
+        // When we have split scope and body scope does not have any scope slots allocated, we don't have to mark the body scope as mustinstantiate.
+        if (funcInfo->frameObjRegister != Js::Constants::NoRegister)
         {
-            // When we have split scope the body scope may be wrongly marked as must instantiate even though the capture occurred
-            // in param scope. This check is to make sure if no capture occurs in body scope make in not must instantiate.
-            bodyScope->SetMustInstantiate(false);
+            bodyScope->SetMustInstantiate(true);
         }
-        else
+        else if (pnodeFnc->sxFnc.IsBodyAndParamScopeMerged() || bodyScope->GetScopeSlotCount() != 0)
         {
-            bodyScope->SetMustInstantiate(funcInfo->frameObjRegister != Js::Constants::NoRegister || funcInfo->frameSlotsRegister != Js::Constants::NoRegister);
+            bodyScope->SetMustInstantiate(funcInfo->frameSlotsRegister != Js::Constants::NoRegister);
         }
-        paramScope->SetMustInstantiate(!paramScope->GetCanMergeWithBodyScope());
+        paramScope->SetMustInstantiate(!pnodeFnc->sxFnc.IsBodyAndParamScopeMerged());
     }
     else
     {
@@ -4112,7 +4198,7 @@ void ByteCodeGenerator::StartEmitFunction(ParseNode *pnodeFnc)
         }
     }
 
-    if (paramScope && !paramScope->GetCanMergeWithBodyScope())
+    if (!funcInfo->IsBodyAndParamScopeMerged())
     {
         ParseNodePtr paramBlock = pnodeFnc->sxFnc.pnodeScopes;
         Assert(paramBlock->nop == knopBlock && paramBlock->sxBlock.blockType == Parameter);
@@ -4171,7 +4257,8 @@ bool ByteCodeGenerator::EnsureSymbolModuleSlots(Symbol* sym, FuncInfo* funcInfo)
 
         AnalysisAssert(moduleNameRecord != nullptr);
         Assert(moduleNameRecord->module->IsSourceTextModuleRecord());
-        Js::SourceTextModuleRecord* resolvedModuleRecord = (Js::SourceTextModuleRecord*)moduleNameRecord->module;
+        Js::SourceTextModuleRecord* resolvedModuleRecord =
+            (Js::SourceTextModuleRecord*)PointerValue(moduleNameRecord->module);
 
         moduleIndex = resolvedModuleRecord->GetModuleId();
         moduleSlotIndex = resolvedModuleRecord->GetLocalExportSlotIndexByLocalName(moduleNameRecord->bindingName);
@@ -4252,7 +4339,7 @@ void ByteCodeGenerator::EndEmitFunction(ParseNode *pnodeFnc)
     FuncInfo *funcInfo = pnodeFnc->sxFnc.funcInfo;
 
     Scope* paramScope = funcInfo->paramScope;
-    if (paramScope && !paramScope->GetCanMergeWithBodyScope())
+    if (!funcInfo->IsBodyAndParamScopeMerged())
     {
         Assert(this->GetCurrentScope() == paramScope);
         PopScope(); // Pop the param scope
@@ -4646,6 +4733,11 @@ void ByteCodeGenerator::EmitLoadInstance(Symbol *sym, IdentPtr pid, Js::RegSlot 
         {
             this->m_writer.Reg1Unsigned1(Js::OpCode::LdInnerScope, instLocation, scope->GetInnerScopeIndex());
         }
+        else if (symScope == funcInfo->GetParamScope())
+        {
+            Assert(funcInfo->frameObjRegister != Js::Constants::NoRegister && !funcInfo->IsBodyAndParamScopeMerged());
+            this->m_writer.Reg1(Js::OpCode::LdParamObj, instLocation);
+        }
         else if (symScope != funcInfo->GetBodyScope())
         {
             this->m_writer.Reg2(Js::OpCode::Ld_A, instLocation, scopeLocation);
@@ -4783,12 +4875,32 @@ ByteCodeGenerator::GetStSlotOp(Scope *scope, int envIndex, Js::RegSlot scopeLoca
     else if (scopeLocation != Js::Constants::NoRegister &&
         scopeLocation == funcInfo->frameSlotsRegister)
     {
-        op = Js::OpCode::StLocalSlot;
+        if (scope->GetScopeType() == ScopeType_Parameter && scope != scope->GetFunc()->GetCurrentChildScope())
+        {
+            // Symbol is from the param scope of a split scope function and we are emitting the body.
+            // We should use the param scope's bytecode now.
+            Assert(!funcInfo->IsBodyAndParamScopeMerged());
+            op = Js::OpCode::StParamSlot;
+        }
+        else
+        {
+            op = Js::OpCode::StLocalSlot;
+        }
     }
     else if (scopeLocation != Js::Constants::NoRegister &&
         scopeLocation == funcInfo->frameObjRegister)
     {
-        op = Js::OpCode::StLocalObjSlot;
+        if (scope->GetScopeType() == ScopeType_Parameter && scope != scope->GetFunc()->GetCurrentChildScope())
+        {
+            // Symbol is from the param scope of a split scope function and we are emitting the body.
+            // We should use the param scope's bytecode now.
+            Assert(!funcInfo->IsBodyAndParamScopeMerged());
+            op = Js::OpCode::StParamObjSlot;
+        }
+        else
+        {
+            op = Js::OpCode::StLocalObjSlot;
+        }
     }
     else
     {
@@ -5118,12 +5230,32 @@ ByteCodeGenerator::GetLdSlotOp(Scope *scope, int envIndex, Js::RegSlot scopeLoca
     else if (scopeLocation != Js::Constants::NoRegister &&
         scopeLocation == funcInfo->frameSlotsRegister)
     {
-        op = Js::OpCode::LdLocalSlot;
+        if (scope->GetScopeType() == ScopeType_Parameter && scope != scope->GetFunc()->GetCurrentChildScope())
+        {
+            // Symbol is from the param scope of a split scope function and we are emitting the body.
+            // We should use the param scope's bytecode now.
+            Assert(!funcInfo->IsBodyAndParamScopeMerged());
+            op = Js::OpCode::LdParamSlot;
+        }
+        else
+        {
+            op = Js::OpCode::LdLocalSlot;
+        }
     }
     else if (scopeLocation != Js::Constants::NoRegister &&
         scopeLocation == funcInfo->frameObjRegister)
     {
-        op = Js::OpCode::LdLocalObjSlot;
+        if (scope->GetScopeType() == ScopeType_Parameter && scope != scope->GetFunc()->GetCurrentChildScope())
+        {
+            // Symbol is from the param scope of a split scope function and we are emitting the body.
+            // We should use the param scope's bytecode now.
+            Assert(!funcInfo->IsBodyAndParamScopeMerged());
+            op = Js::OpCode::LdParamObjSlot;
+        }
+        else
+        {
+            op = Js::OpCode::LdLocalObjSlot;
+        }
     }
     else if (scope->HasInnerScopeIndex())
     {
@@ -6500,7 +6632,7 @@ void EmitDestructuredArrayCore(
 // try {
 //    CallIteratorClose
 // } catch (e) {
-//    do nothing 
+//    do nothing
 // }
 
 void EmitTryCatchAroundClose(
@@ -6725,7 +6857,7 @@ void EmitDestructuredArray(
         regOffset = funcInfo->AcquireTmpRegister();
     }
 
-    // Insert try node here 
+    // Insert try node here
     Js::ByteCodeLabel finallyLabel = byteCodeGenerator->Writer()->DefineLabel();
     Js::ByteCodeLabel catchLabel = byteCodeGenerator->Writer()->DefineLabel();
     byteCodeGenerator->Writer()->RecordCrossFrameEntryExitRecord(true);
@@ -6956,7 +7088,8 @@ void EmitAssignment(
         uint cacheId = funcInfo->FindOrAddInlineCacheId(lhs->sxBin.pnode1->location, propertyId, false, true);
         if (lhs->sxBin.pnode1->nop == knopSuper)
         {
-            byteCodeGenerator->Writer()->PatchablePropertyWithThisPtr(Js::OpCode::StSuperFld, rhsLocation, lhs->sxBin.pnode1->location, funcInfo->thisPointerRegister, cacheId);
+            Js::RegSlot tmpReg = byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo);
+            byteCodeGenerator->Writer()->PatchablePropertyWithThisPtr(Js::OpCode::StSuperFld, rhsLocation, tmpReg, funcInfo->thisPointerRegister, cacheId);
         }
         else
         {
@@ -7714,7 +7847,12 @@ void EmitCallTarget(
 
         Emit(pnodeTarget->sxBin.pnode1, byteCodeGenerator, funcInfo, false);
         Js::PropertyId propertyId = pnodeTarget->sxBin.pnode2->sxPid.PropertyIdFromNameNode();
-        Js::RegSlot protoLocation = pnodeTarget->sxBin.pnode1->location;
+
+        Js::RegSlot protoLocation =
+            (pnodeTarget->sxBin.pnode1->nop == knopSuper) ?
+            byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo) :
+            pnodeTarget->sxBin.pnode1->location;
+
         EmitSuperMethodBegin(pnodeTarget, byteCodeGenerator, funcInfo);
         EmitMethodFld(pnodeTarget, protoLocation, propertyId, byteCodeGenerator, funcInfo);
 
@@ -7738,7 +7876,12 @@ void EmitCallTarget(
         Emit(pnodeTarget->sxBin.pnode2, byteCodeGenerator, funcInfo, false);
 
         Js::RegSlot indexLocation = pnodeTarget->sxBin.pnode2->location;
-        Js::RegSlot protoLocation = pnodeTarget->sxBin.pnode1->location;
+
+        Js::RegSlot protoLocation =
+            (pnodeTarget->sxBin.pnode1->nop == knopSuper) ?
+            byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo) :
+            pnodeTarget->sxBin.pnode1->location;
+
         EmitSuperMethodBegin(pnodeTarget, byteCodeGenerator, funcInfo);
         EmitMethodElem(pnodeTarget, protoLocation, indexLocation, byteCodeGenerator);
 
@@ -7892,7 +8035,15 @@ void EmitCallI(
 
         if (op == Js::OpCode::CallI || op == Js::OpCode::CallIFlags)
         {
-            byteCodeGenerator->Writer()->CallI(op, pnode->location, pnodeTarget->location, actualArgSlotCount, callSiteId, callFlags);
+            if (pnodeTarget->nop == knopSuper)
+            {
+                Js::RegSlot tmpReg = byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdFuncObjProto, pnodeTarget->location, funcInfo);
+                byteCodeGenerator->Writer()->CallI(op, pnode->location, tmpReg, actualArgSlotCount, callSiteId, callFlags);
+            }
+            else
+            {
+                byteCodeGenerator->Writer()->CallI(op, pnode->location, pnodeTarget->location, actualArgSlotCount, callSiteId, callFlags);
+            }
         }
         else
         {
@@ -7907,7 +8058,15 @@ void EmitCallI(
                 options = Js::CallIExtended_SpreadArgs;
             }
 
-            byteCodeGenerator->Writer()->CallIExtended(op, pnode->location, pnodeTarget->location, actualArgSlotCount, options, spreadIndices, spreadIndicesSize, callSiteId, callFlags);
+            if (pnodeTarget->nop == knopSuper)
+            {
+                Js::RegSlot tmpReg = byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdFuncObjProto, pnodeTarget->location, funcInfo);
+                byteCodeGenerator->Writer()->CallIExtended(op, pnode->location, tmpReg, actualArgSlotCount, options, spreadIndices, spreadIndicesSize, callSiteId, callFlags);
+            }
+            else
+            {
+                byteCodeGenerator->Writer()->CallIExtended(op, pnode->location, pnodeTarget->location, actualArgSlotCount, options, spreadIndices, spreadIndicesSize, callSiteId, callFlags);
+            }
         }
 
         if (pnode->sxCall.spreadArgCount > 0)
@@ -8013,6 +8172,107 @@ void EmitCallInstr(
     EmitCallI(pnode, /*fEvaluateComponents*/ TRUE, fIsPut, fIsEval, fHasNewTarget, actualArgCount, byteCodeGenerator, funcInfo, callSiteId, spreadIndices);
 }
 
+void EmitNew(ParseNode* pnode, ByteCodeGenerator* byteCodeGenerator, FuncInfo* funcInfo)
+{
+    Js::ArgSlot argCount = pnode->sxCall.argCount;
+    argCount++; // include "this"
+
+    BOOL fSideEffectArgs = FALSE;
+    unsigned int tmpCount = CountArguments(pnode->sxCall.pnodeArgs, &fSideEffectArgs);
+    Assert(argCount == tmpCount);
+
+    if (argCount != (Js::ArgSlot)argCount)
+    {
+        Js::Throw::OutOfMemory();
+    }
+
+    byteCodeGenerator->StartStatement(pnode);
+
+    // Start call, allocate out param space
+    funcInfo->StartRecordingOutArgs(argCount);
+
+    // Assign the call target operand(s), putting them into expression temps if necessary to protect
+    // them from side-effects.
+    if (fSideEffectArgs)
+    {
+        SaveOpndValue(pnode->sxCall.pnodeTarget, funcInfo);
+    }
+
+    if (pnode->sxCall.pnodeTarget->nop == knopSuper)
+    {
+        EmitSuperFieldPatch(funcInfo, pnode, byteCodeGenerator);
+    }
+
+    Emit(pnode->sxCall.pnodeTarget, byteCodeGenerator, funcInfo, false, true);
+
+    if (pnode->sxCall.pnodeArgs == nullptr)
+    {
+        funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
+        Js::OpCode op = (CreateNativeArrays(byteCodeGenerator, funcInfo)
+            && CallTargetIsArray(pnode->sxCall.pnodeTarget))
+            ? Js::OpCode::NewScObjArray : Js::OpCode::NewScObject;
+        Assert(argCount == 1);
+
+        Js::ProfileId callSiteId = byteCodeGenerator->GetNextCallSiteId(op);
+        byteCodeGenerator->Writer()->StartCall(Js::OpCode::StartCall, argCount);
+        byteCodeGenerator->Writer()->CallI(op, funcInfo->AcquireLoc(pnode),
+            pnode->sxCall.pnodeTarget->location, argCount, callSiteId);
+    }
+    else
+    {
+        byteCodeGenerator->Writer()->StartCall(Js::OpCode::StartCall, argCount);
+        uint32 actualArgCount = 0;
+
+        if (IsCallOfConstants(pnode))
+        {
+            funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
+            actualArgCount = EmitNewObjectOfConstants(pnode, byteCodeGenerator, funcInfo, argCount);
+        }
+        else
+        {
+            Js::OpCode op;
+            if ((CreateNativeArrays(byteCodeGenerator, funcInfo) && CallTargetIsArray(pnode->sxCall.pnodeTarget)))
+            {
+                op = pnode->sxCall.spreadArgCount > 0 ? Js::OpCode::NewScObjArraySpread : Js::OpCode::NewScObjArray;
+            }
+            else
+            {
+                op = pnode->sxCall.spreadArgCount > 0 ? Js::OpCode::NewScObjectSpread : Js::OpCode::NewScObject;
+            }
+
+            Js::ProfileId callSiteId = byteCodeGenerator->GetNextCallSiteId(op);
+
+
+            Js::AuxArray<uint32> *spreadIndices = nullptr;
+            actualArgCount = EmitArgList(pnode->sxCall.pnodeArgs, Js::Constants::NoRegister, Js::Constants::NoRegister, Js::Constants::NoRegister,
+                false, true, byteCodeGenerator, funcInfo, callSiteId, pnode->sxCall.spreadArgCount, &spreadIndices);
+            funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
+
+
+            if (pnode->sxCall.spreadArgCount > 0)
+            {
+                Assert(spreadIndices != nullptr);
+                uint spreadExtraAlloc = spreadIndices->count * sizeof(uint32);
+                uint spreadIndicesSize = sizeof(*spreadIndices) + spreadExtraAlloc;
+                byteCodeGenerator->Writer()->CallIExtended(op, funcInfo->AcquireLoc(pnode), pnode->sxCall.pnodeTarget->location,
+                    (uint16)actualArgCount, Js::CallIExtended_SpreadArgs,
+                    spreadIndices, spreadIndicesSize, callSiteId);
+            }
+            else
+            {
+                byteCodeGenerator->Writer()->CallI(op, funcInfo->AcquireLoc(pnode), pnode->sxCall.pnodeTarget->location,
+                    (uint16)actualArgCount, callSiteId);
+            }
+        }
+
+        Assert(argCount == actualArgCount);
+    }
+
+    // End call, pop param space
+    funcInfo->EndRecordingOutArgs(argCount);
+    return;
+}
+
 void EmitCall(
     ParseNode* pnode,
     Js::RegSlot rhsLocation,
@@ -8032,6 +8292,15 @@ void EmitCall(
     ParseNode *pnodeTarget = pnode->sxCall.pnodeTarget;
     ParseNode *pnodeArgs = pnode->sxCall.pnodeArgs;
     uint16 spreadArgCount = pnode->sxCall.spreadArgCount;
+
+    if (CreateNativeArrays(byteCodeGenerator, funcInfo) && CallTargetIsArray(pnode->sxCall.pnodeTarget)) {
+        // some minifiers (potentially incorrectly) assume that "v = new Array()" and "v = Array()" are equivalent,
+        // and replace the former with the latter to save 4 characters. What that means for us is that it, at least
+        // initially, uses the "Call" path. We want to guess that it _is_ just "new Array()" and change over to the
+        // "new" path, since then our native array handling can kick in.
+        /*EmitNew(pnode, byteCodeGenerator, funcInfo);
+        return;*/
+    }
 
     unsigned int argCount = CountArguments(pnode->sxCall.pnodeArgs, &fSideEffectArgs) + (unsigned int)fIsPut;
 
@@ -8401,7 +8670,7 @@ void EmitObjectInitializers(ParseNode *memberList, Js::RegSlot objectLocation, B
     }
     else
     {
-        Js::PropertyIdArray *propIds = AnewPlus(byteCodeGenerator->GetAllocator(), argCount * sizeof(Js::PropertyId), Js::PropertyIdArray, argCount);
+        Js::PropertyIdArray *propIds = AnewPlus(byteCodeGenerator->GetAllocator(), argCount * sizeof(Js::PropertyId), Js::PropertyIdArray, argCount, 0);
 
         if (propertyIds->ContainsKey(Js::PropertyIds::__proto__))
         {
@@ -8756,6 +9025,75 @@ void SetNewArrayElements(ParseNode *pnode, Js::RegSlot arrayLocation, ByteCodeGe
 void EmitBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, Js::ByteCodeLabel falseLabel, ByteCodeGenerator *byteCodeGenerator,
     FuncInfo *funcInfo)
 {
+    byteCodeGenerator->StartStatement(expr);
+    switch (expr->nop)
+    {
+
+    case knopLogOr:
+    {
+        Js::ByteCodeLabel leftFalse = byteCodeGenerator->Writer()->DefineLabel();
+        EmitBooleanExpression(expr->sxBin.pnode1, trueLabel, leftFalse, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode1);
+        byteCodeGenerator->Writer()->MarkLabel(leftFalse);
+        EmitBooleanExpression(expr->sxBin.pnode2, trueLabel, falseLabel, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode2);
+        break;
+    }
+
+    case knopLogAnd:
+    {
+        Js::ByteCodeLabel leftTrue = byteCodeGenerator->Writer()->DefineLabel();
+        EmitBooleanExpression(expr->sxBin.pnode1, leftTrue, falseLabel, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode1);
+        byteCodeGenerator->Writer()->MarkLabel(leftTrue);
+        EmitBooleanExpression(expr->sxBin.pnode2, trueLabel, falseLabel, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode2);
+        break;
+    }
+
+    case knopLogNot:
+        EmitBooleanExpression(expr->sxUni.pnode1, falseLabel, trueLabel, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxUni.pnode1);
+        break;
+
+    case knopEq:
+    case knopEqv:
+    case knopNEqv:
+    case knopNe:
+    case knopLt:
+    case knopLe:
+    case knopGe:
+    case knopGt:
+        EmitBinaryOpnds(expr->sxBin.pnode1, expr->sxBin.pnode2, byteCodeGenerator, funcInfo);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode2);
+        funcInfo->ReleaseLoc(expr->sxBin.pnode1);
+        byteCodeGenerator->Writer()->BrReg2(nopToOp[expr->nop], trueLabel, expr->sxBin.pnode1->location,
+            expr->sxBin.pnode2->location);
+        byteCodeGenerator->Writer()->Br(falseLabel);
+        break;
+    case knopTrue:
+        byteCodeGenerator->Writer()->Br(trueLabel);
+        break;
+    case knopFalse:
+        byteCodeGenerator->Writer()->Br(falseLabel);
+        break;
+    default:
+        // Note: we usually release the temp assigned to a node after we Emit it.
+        // But in this case, EmitBooleanExpression is just a wrapper around a normal Emit call,
+        // and the caller of EmitBooleanExpression expects to be able to release this register.
+
+        Emit(expr, byteCodeGenerator, funcInfo, false);
+        byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+        byteCodeGenerator->Writer()->Br(falseLabel);
+        break;
+    }
+
+    byteCodeGenerator->EndStatement(expr);
+}
+
+void EmitGeneratingBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, bool truefallthrough, Js::ByteCodeLabel falseLabel, bool falsefallthrough, Js::RegSlot writeto,
+    ByteCodeGenerator *byteCodeGenerator, FuncInfo *funcInfo)
+{
     switch (expr->nop)
     {
 
@@ -8763,10 +9101,10 @@ void EmitBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, Js::Byt
     {
         byteCodeGenerator->StartStatement(expr);
         Js::ByteCodeLabel leftFalse = byteCodeGenerator->Writer()->DefineLabel();
-        EmitBooleanExpression(expr->sxBin.pnode1, trueLabel, leftFalse, byteCodeGenerator, funcInfo);
+        EmitGeneratingBooleanExpression(expr->sxBin.pnode1, trueLabel, false, leftFalse, true, writeto, byteCodeGenerator, funcInfo);
         funcInfo->ReleaseLoc(expr->sxBin.pnode1);
         byteCodeGenerator->Writer()->MarkLabel(leftFalse);
-        EmitBooleanExpression(expr->sxBin.pnode2, trueLabel, falseLabel, byteCodeGenerator, funcInfo);
+        EmitGeneratingBooleanExpression(expr->sxBin.pnode2, trueLabel, truefallthrough, falseLabel, falsefallthrough, writeto, byteCodeGenerator, funcInfo);
         funcInfo->ReleaseLoc(expr->sxBin.pnode2);
         byteCodeGenerator->EndStatement(expr);
         break;
@@ -8776,22 +9114,35 @@ void EmitBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, Js::Byt
     {
         byteCodeGenerator->StartStatement(expr);
         Js::ByteCodeLabel leftTrue = byteCodeGenerator->Writer()->DefineLabel();
-        EmitBooleanExpression(expr->sxBin.pnode1, leftTrue, falseLabel, byteCodeGenerator, funcInfo);
+        EmitGeneratingBooleanExpression(expr->sxBin.pnode1, leftTrue, true, falseLabel, false, writeto, byteCodeGenerator, funcInfo);
         funcInfo->ReleaseLoc(expr->sxBin.pnode1);
         byteCodeGenerator->Writer()->MarkLabel(leftTrue);
-        EmitBooleanExpression(expr->sxBin.pnode2, trueLabel, falseLabel, byteCodeGenerator, funcInfo);
+        EmitGeneratingBooleanExpression(expr->sxBin.pnode2, trueLabel, truefallthrough, falseLabel, falsefallthrough, writeto, byteCodeGenerator, funcInfo);
         funcInfo->ReleaseLoc(expr->sxBin.pnode2);
         byteCodeGenerator->EndStatement(expr);
         break;
     }
 
     case knopLogNot:
+    {
         byteCodeGenerator->StartStatement(expr);
-        EmitBooleanExpression(expr->sxUni.pnode1, falseLabel, trueLabel, byteCodeGenerator, funcInfo);
+        // this time we want a boolean expression, since Logical Not is nice and only returns true or false
+        Js::ByteCodeLabel emitTrue = byteCodeGenerator->Writer()->DefineLabel();
+        Js::ByteCodeLabel emitFalse = byteCodeGenerator->Writer()->DefineLabel();
+        EmitBooleanExpression(expr->sxUni.pnode1, emitFalse, emitTrue, byteCodeGenerator, funcInfo);
+        byteCodeGenerator->Writer()->MarkLabel(emitTrue);
+        byteCodeGenerator->Writer()->Reg1(Js::OpCode::LdTrue, writeto);
+        byteCodeGenerator->Writer()->Br(trueLabel);
+        byteCodeGenerator->Writer()->MarkLabel(emitFalse);
+        byteCodeGenerator->Writer()->Reg1(Js::OpCode::LdFalse, writeto);
+        if (!falsefallthrough)
+        {
+            byteCodeGenerator->Writer()->Br(falseLabel);
+        }
         funcInfo->ReleaseLoc(expr->sxUni.pnode1);
         byteCodeGenerator->EndStatement(expr);
         break;
-
+    }
     case knopEq:
     case knopEqv:
     case knopNEqv:
@@ -8804,19 +9155,40 @@ void EmitBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, Js::Byt
         EmitBinaryOpnds(expr->sxBin.pnode1, expr->sxBin.pnode2, byteCodeGenerator, funcInfo);
         funcInfo->ReleaseLoc(expr->sxBin.pnode2);
         funcInfo->ReleaseLoc(expr->sxBin.pnode1);
-        byteCodeGenerator->Writer()->BrReg2(nopToOp[expr->nop], trueLabel, expr->sxBin.pnode1->location,
+        funcInfo->AcquireLoc(expr);
+        byteCodeGenerator->Writer()->Reg3(nopToCMOp[expr->nop], expr->location, expr->sxBin.pnode1->location,
             expr->sxBin.pnode2->location);
-        byteCodeGenerator->Writer()->Br(falseLabel);
+        byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, writeto, expr->location);
+        // The inliner likes small bytecode
+        if (!(truefallthrough || falsefallthrough))
+        {
+            byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+            byteCodeGenerator->Writer()->Br(falseLabel);
+        }
+        else if (truefallthrough && !falsefallthrough) {
+            byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrFalse_A, falseLabel, expr->location);
+        }
+        else if (falsefallthrough && !truefallthrough) {
+            byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+        }
         byteCodeGenerator->EndStatement(expr);
         break;
     case knopTrue:
         byteCodeGenerator->StartStatement(expr);
-        byteCodeGenerator->Writer()->Br(trueLabel);
+        byteCodeGenerator->Writer()->Reg1(Js::OpCode::LdTrue, writeto);
+        if (!truefallthrough)
+        {
+            byteCodeGenerator->Writer()->Br(trueLabel);
+        }
         byteCodeGenerator->EndStatement(expr);
         break;
     case knopFalse:
         byteCodeGenerator->StartStatement(expr);
-        byteCodeGenerator->Writer()->Br(falseLabel);
+        byteCodeGenerator->Writer()->Reg1(Js::OpCode::LdFalse, writeto);
+        if (!falsefallthrough)
+        {
+            byteCodeGenerator->Writer()->Br(falseLabel);
+        }
         byteCodeGenerator->EndStatement(expr);
         break;
     default:
@@ -8829,15 +9201,37 @@ void EmitBooleanExpression(ParseNode *expr, Js::ByteCodeLabel trueLabel, Js::Byt
         {
             byteCodeGenerator->StartStatement(expr);
             Emit(expr, byteCodeGenerator, funcInfo, false);
-            byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
-            byteCodeGenerator->Writer()->Br(falseLabel);
+            byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, writeto, expr->location);
+            // The inliner likes small bytecode
+            if (!(truefallthrough || falsefallthrough))
+            {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+                byteCodeGenerator->Writer()->Br(falseLabel);
+            }
+            else if (truefallthrough && !falsefallthrough) {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrFalse_A, falseLabel, expr->location);
+            }
+            else if (falsefallthrough && !truefallthrough) {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+            }
             byteCodeGenerator->EndStatement(expr);
         }
         else
         {
             Emit(expr, byteCodeGenerator, funcInfo, false);
-            byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
-            byteCodeGenerator->Writer()->Br(falseLabel);
+            byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, writeto, expr->location);
+            // The inliner likes small bytecode
+            if (!(truefallthrough || falsefallthrough))
+            {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+                byteCodeGenerator->Writer()->Br(falseLabel);
+            }
+            else if (truefallthrough && !falsefallthrough) {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrFalse_A, falseLabel, expr->location);
+            }
+            else if (falsefallthrough && !truefallthrough) {
+                byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, trueLabel, expr->location);
+            }
         }
         break;
     }
@@ -8994,7 +9388,7 @@ void EmitIteratorNext(Js::RegSlot itemLocation, Js::RegSlot iteratorLocation, Js
 // Generating
 // if (hasReturnFunction) {
 //     value = Call Retrun;
-//     if (value != Object) 
+//     if (value != Object)
 //        throw TypeError;
 // }
 
@@ -9098,13 +9492,16 @@ void EmitForIn(ParseNode *loopNode,
     BOOL fReturnValue)
 {
     Assert(loopNode->nop == knopForIn);
+    Assert(loopNode->location == Js::Constants::NoRegister);
 
     // Grab registers for the enumerator and for the current enumerated item.
     // The enumerator register will be released after this call returns.
     loopNode->sxForInOrForOf.itemLocation = funcInfo->AcquireTmpRegister();
 
+    uint forInLoopLevel = funcInfo->AcquireForInLoopLevel();
+
     // get enumerator from the collection
-    byteCodeGenerator->Writer()->Reg2(Js::OpCode::GetForInEnumerator, loopNode->location, loopNode->sxForInOrForOf.pnodeObj->location);
+    byteCodeGenerator->Writer()->Reg1Unsigned1(Js::OpCode::InitForInEnumerator, loopNode->sxForInOrForOf.pnodeObj->location, forInLoopLevel);
 
     // The StartStatement is already done in the caller of the current function, which is EmitForInOrForOf
     byteCodeGenerator->EndStatement(loopNode);
@@ -9117,13 +9514,13 @@ void EmitForIn(ParseNode *loopNode,
     byteCodeGenerator->StartStatement(loopNode->sxForInOrForOf.pnodeLval);
 
     // branch past loop when MoveAndGetNext returns nullptr
-    byteCodeGenerator->Writer()->BrReg2(Js::OpCode::BrOnEmpty, continuePastLoop, loopNode->sxForInOrForOf.itemLocation, loopNode->location);
-    
+    byteCodeGenerator->Writer()->BrReg1Unsigned1(Js::OpCode::BrOnEmpty, continuePastLoop, loopNode->sxForInOrForOf.itemLocation, forInLoopLevel);
+
     EmitForInOfLoopBody(loopNode, loopEntrance, continuePastLoop, byteCodeGenerator, funcInfo, fReturnValue);
 
     byteCodeGenerator->Writer()->ExitLoop(loopId);
 
-    byteCodeGenerator->Writer()->Reg1(Js::OpCode::ReleaseForInEnumerator, loopNode->location);
+    funcInfo->ReleaseForInLoopLevel(forInLoopLevel);
 
     if (!byteCodeGenerator->IsES6ForLoopSemanticsEnabled())
     {
@@ -9139,7 +9536,10 @@ void EmitForInOrForOf(ParseNode *loopNode, ByteCodeGenerator *byteCodeGenerator,
     BeginEmitBlock(loopNode->sxForInOrForOf.pnodeBlock, byteCodeGenerator, funcInfo);
 
     byteCodeGenerator->StartStatement(loopNode);
-    funcInfo->AcquireLoc(loopNode);
+    if (!isForIn)
+    {
+        funcInfo->AcquireLoc(loopNode);
+    }
 
     // Record the branch bytecode offset.
     // This is used for "ignore exception" and "set next stmt" scenarios. See ProbeContainer::GetNextUserStatementOffsetForAdvance:
@@ -9189,12 +9589,17 @@ void EmitForInOrForOf(ParseNode *loopNode, ByteCodeGenerator *byteCodeGenerator,
         return;
     }
 
+    Js::ByteCodeLabel skipThrow = byteCodeGenerator->Writer()->DefineLabel();
+    byteCodeGenerator->Writer()->BrReg2(Js::OpCode::BrNeq_A, skipThrow, loopNode->sxForInOrForOf.pnodeObj->location, funcInfo->undefinedConstantRegister);
+    byteCodeGenerator->Writer()->W1(Js::OpCode::RuntimeTypeError, SCODE_CODE(JSERR_ObjectCoercible));
+    byteCodeGenerator->Writer()->MarkLabel(skipThrow);
+
     Js::RegSlot regException = Js::Constants::NoRegister;
     Js::RegSlot regOffset = Js::Constants::NoRegister;
 
     // These two temp variables store the information of return function to be called or not.
     // one variable is used for catch block and one is used for finally block. These variable will be set to true when we think that return function
-    // to be called on abrupt loop break. 
+    // to be called on abrupt loop break.
     // Why two variables? since these are temps and JIT does like not flow if single variable is used in multiple blocks.
     Js::RegSlot shouldCallReturnFunctionLocation = funcInfo->AcquireTmpRegister();
     Js::RegSlot shouldCallReturnFunctionLocationFinally = funcInfo->AcquireTmpRegister();
@@ -9211,15 +9616,9 @@ void EmitForInOrForOf(ParseNode *loopNode, ByteCodeGenerator *byteCodeGenerator,
     // The enumerator register will be released after this call returns.
     loopNode->sxForInOrForOf.itemLocation = funcInfo->AcquireTmpRegister();
 
-    Js::ByteCodeLabel skipPastLoop = byteCodeGenerator->Writer()->DefineLabel();
-
     // We want call profile information on the @@iterator call, so instead of adding a GetForOfIterator bytecode op
     // to do all the following work in a helper do it explicitly in bytecode so that the @@iterator call is exposed
     // to the profiler and JIT.
-
-    // If collection is null or undefined, don't enter the loop.
-    byteCodeGenerator->Writer()->BrReg2(Js::OpCode::BrSrEq_A, skipPastLoop, loopNode->sxForInOrForOf.pnodeObj->location, funcInfo->nullConstantRegister);
-    byteCodeGenerator->Writer()->BrReg2(Js::OpCode::BrSrEq_A, skipPastLoop, loopNode->sxForInOrForOf.pnodeObj->location, funcInfo->undefinedConstantRegister);
 
     byteCodeGenerator->SetHasFinally(true);
     byteCodeGenerator->SetHasTry(true);
@@ -9301,8 +9700,6 @@ void EmitForInOrForOf(ParseNode *loopNode, ByteCodeGenerator *byteCodeGenerator,
         regOffset,
         byteCodeGenerator,
         funcInfo);
-
-    byteCodeGenerator->Writer()->MarkLabel(skipPastLoop);
 
     if (!byteCodeGenerator->IsES6ForLoopSemanticsEnabled())
     {
@@ -9690,7 +10087,7 @@ void EmitSuperFieldPatch(FuncInfo* funcInfo, ParseNode* pnode, ByteCodeGenerator
 
     if (byteCodeGenerator->GetFlags() & fscrEval)
     {
-        // If we are inside an eval, ScopedLdSuper will take care of the patch.
+        // If we are inside an eval, ScopedLdHomeObj will take care of the patch.
         return;
     }
 
@@ -10033,22 +10430,12 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
             {
                 if ((byteCodeGenerator->GetFlags() & fscrEval))
                 {
-                    byteCodeGenerator->Writer()->Reg1(isConstructorCall ? Js::OpCode::ScopedLdSuperCtor : Js::OpCode::ScopedLdSuper, funcInfo->AcquireLoc(pnode));
+                    byteCodeGenerator->Writer()->Reg1(isConstructorCall ? Js::OpCode::ScopedLdFuncObj : Js::OpCode::ScopedLdHomeObj, funcInfo->AcquireLoc(pnode));
                 }
                 else
                 {
                     byteCodeGenerator->Writer()->W1(Js::OpCode::RuntimeReferenceError, SCODE_CODE(JSERR_BadSuperReference));
                 }
-            }
-            else
-            {
-                Js::ByteCodeLabel errLabel = byteCodeGenerator->Writer()->DefineLabel();
-                Js::ByteCodeLabel skipLabel = byteCodeGenerator->Writer()->DefineLabel();
-                byteCodeGenerator->Writer()->BrReg2(Js::OpCode::BrEq_A, errLabel, funcInfo->superRegister, funcInfo->undefinedConstantRegister);
-                byteCodeGenerator->Writer()->Br(Js::OpCode::Br, skipLabel);
-                byteCodeGenerator->Writer()->MarkLabel(errLabel);
-                byteCodeGenerator->Writer()->W1(Js::OpCode::RuntimeReferenceError, SCODE_CODE(JSERR_BadSuperReference));
-                byteCodeGenerator->Writer()->MarkLabel(skipLabel);
             }
         }
         break;
@@ -10361,102 +10748,7 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
         break;
     case knopNew:
     {
-        Js::ArgSlot argCount = pnode->sxCall.argCount;
-        argCount++; // include "this"
-
-        BOOL fSideEffectArgs = FALSE;
-        unsigned int tmpCount = CountArguments(pnode->sxCall.pnodeArgs, &fSideEffectArgs);
-        Assert(argCount == tmpCount);
-
-        if (argCount != (Js::ArgSlot)argCount)
-        {
-            Js::Throw::OutOfMemory();
-        }
-
-        byteCodeGenerator->StartStatement(pnode);
-
-        // Start call, allocate out param space
-        funcInfo->StartRecordingOutArgs(argCount);
-
-        // Assign the call target operand(s), putting them into expression temps if necessary to protect
-        // them from side-effects.
-        if (fSideEffectArgs)
-        {
-            SaveOpndValue(pnode->sxCall.pnodeTarget, funcInfo);
-        }
-
-        if (pnode->sxCall.pnodeTarget->nop == knopSuper)
-        {
-            EmitSuperFieldPatch(funcInfo, pnode, byteCodeGenerator);
-        }
-
-        Emit(pnode->sxCall.pnodeTarget, byteCodeGenerator, funcInfo, false, true);
-
-        if (pnode->sxCall.pnodeArgs == nullptr)
-        {
-            funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
-            Js::OpCode op = (CreateNativeArrays(byteCodeGenerator, funcInfo)
-                && CallTargetIsArray(pnode->sxCall.pnodeTarget))
-                ? Js::OpCode::NewScObjArray : Js::OpCode::NewScObject;
-            Assert(argCount == 1);
-
-            Js::ProfileId callSiteId = byteCodeGenerator->GetNextCallSiteId(op);
-            byteCodeGenerator->Writer()->StartCall(Js::OpCode::StartCall, argCount);
-            byteCodeGenerator->Writer()->CallI(op, funcInfo->AcquireLoc(pnode),
-                pnode->sxCall.pnodeTarget->location, argCount, callSiteId);
-        }
-        else
-        {
-            byteCodeGenerator->Writer()->StartCall(Js::OpCode::StartCall, argCount);
-            uint32 actualArgCount = 0;
-
-            if (IsCallOfConstants(pnode))
-            {
-                funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
-                actualArgCount = EmitNewObjectOfConstants(pnode, byteCodeGenerator, funcInfo, argCount);
-            }
-            else
-            {
-                Js::OpCode op;
-                if ((CreateNativeArrays(byteCodeGenerator, funcInfo) && CallTargetIsArray(pnode->sxCall.pnodeTarget)))
-                {
-                    op = pnode->sxCall.spreadArgCount > 0 ? Js::OpCode::NewScObjArraySpread : Js::OpCode::NewScObjArray;
-                }
-                else
-                {
-                    op = pnode->sxCall.spreadArgCount > 0 ? Js::OpCode::NewScObjectSpread : Js::OpCode::NewScObject;
-                }
-
-                Js::ProfileId callSiteId = byteCodeGenerator->GetNextCallSiteId(op);
-
-
-                Js::AuxArray<uint32> *spreadIndices = nullptr;
-                actualArgCount = EmitArgList(pnode->sxCall.pnodeArgs, Js::Constants::NoRegister, Js::Constants::NoRegister, Js::Constants::NoRegister,
-                    false, true, byteCodeGenerator, funcInfo, callSiteId, pnode->sxCall.spreadArgCount, &spreadIndices);
-                funcInfo->ReleaseLoc(pnode->sxCall.pnodeTarget);
-
-
-                if (pnode->sxCall.spreadArgCount > 0)
-                {
-                    Assert(spreadIndices != nullptr);
-                    uint spreadExtraAlloc = spreadIndices->count * sizeof(uint32);
-                    uint spreadIndicesSize = sizeof(*spreadIndices) + spreadExtraAlloc;
-                    byteCodeGenerator->Writer()->CallIExtended(op, funcInfo->AcquireLoc(pnode), pnode->sxCall.pnodeTarget->location,
-                        (uint16)actualArgCount, Js::CallIExtended_SpreadArgs,
-                        spreadIndices, spreadIndicesSize, callSiteId);
-                }
-                else
-                {
-                    byteCodeGenerator->Writer()->CallI(op, funcInfo->AcquireLoc(pnode), pnode->sxCall.pnodeTarget->location,
-                        (uint16)actualArgCount, callSiteId);
-                }
-            }
-
-            Assert(argCount == actualArgCount);
-        }
-
-        // End call, pop param space
-        funcInfo->EndRecordingOutArgs(argCount);
+        EmitNew(pnode, byteCodeGenerator, funcInfo);
 
         byteCodeGenerator->EndStatement(pnode);
         break;
@@ -10479,8 +10771,17 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
             Js::PropertyId propertyId = pexpr->sxBin.pnode2->sxPid.PropertyIdFromNameNode();
             funcInfo->ReleaseLoc(pexpr->sxBin.pnode1);
             funcInfo->AcquireLoc(pnode);
-            byteCodeGenerator->Writer()->Property(Js::OpCode::DeleteFld, pnode->location, pexpr->sxBin.pnode1->location,
-                funcInfo->FindOrAddReferencedPropertyId(propertyId));
+
+            if (pexpr->sxBin.pnode1->nop == knopSuper)
+            {
+                byteCodeGenerator->Writer()->W1(Js::OpCode::RuntimeReferenceError, SCODE_CODE(JSERR_DeletePropertyWithSuper));
+            }
+            else
+            {
+                byteCodeGenerator->Writer()->Property(Js::OpCode::DeleteFld, pnode->location, pexpr->sxBin.pnode1->location,
+                    funcInfo->FindOrAddReferencedPropertyId(propertyId));
+            }
+
             break;
         }
         case knopIndex:
@@ -10543,10 +10844,16 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
         funcInfo->AcquireLoc(pnode);
 
         Js::RegSlot callObjLocation = pnode->sxBin.pnode1->location;
-        Js::RegSlot protoLocation = callObjLocation;
+
+        Js::RegSlot protoLocation =
+            (pnode->sxBin.pnode1->nop == knopSuper) ?
+            byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo) :
+            callObjLocation;
+
         EmitSuperMethodBegin(pnode, byteCodeGenerator, funcInfo);
         byteCodeGenerator->Writer()->Element(
             Js::OpCode::LdElemI_A, pnode->location, protoLocation, pnode->sxBin.pnode2->location);
+
         ENDSTATEMENET_IFTOPLEVEL(isTopLevel, pnode);
         break;
     }
@@ -10562,27 +10869,29 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
         Js::RegSlot protoLocation = callObjLocation;
         EmitSuperMethodBegin(pnode, byteCodeGenerator, funcInfo);
 
-        if (propertyId == Js::PropertyIds::length)
+        uint cacheId = funcInfo->FindOrAddInlineCacheId(callObjLocation, propertyId, false, false);
+        if (pnode->IsCallApplyTargetLoad())
         {
-            byteCodeGenerator->Writer()->Reg2(Js::OpCode::LdLen_A, pnode->location, protoLocation);
-        }
-        else
-        {
-            uint cacheId = funcInfo->FindOrAddInlineCacheId(callObjLocation, propertyId, false, false);
-            if (pnode->IsCallApplyTargetLoad())
+            if (pnode->sxBin.pnode1->nop == knopSuper)
             {
-                byteCodeGenerator->Writer()->PatchableProperty(Js::OpCode::LdFldForCallApplyTarget, pnode->location, protoLocation, cacheId);
+                Js::RegSlot tmpReg = byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo);
+                byteCodeGenerator->Writer()->PatchableProperty(Js::OpCode::LdFldForCallApplyTarget, pnode->location, tmpReg, cacheId);
             }
             else
             {
-                if (pnode->sxBin.pnode1->nop == knopSuper)
-                {
-                    byteCodeGenerator->Writer()->PatchablePropertyWithThisPtr(Js::OpCode::LdSuperFld, pnode->location, protoLocation, funcInfo->thisPointerRegister, cacheId, isConstructorCall);
-                }
-                else
-                {
-                    byteCodeGenerator->Writer()->PatchableProperty(Js::OpCode::LdFld, pnode->location, callObjLocation, cacheId, isConstructorCall);
-                }
+                byteCodeGenerator->Writer()->PatchableProperty(Js::OpCode::LdFldForCallApplyTarget, pnode->location, protoLocation, cacheId);
+            }
+        }
+        else
+        {
+            if (pnode->sxBin.pnode1->nop == knopSuper)
+            {
+                Js::RegSlot tmpReg = byteCodeGenerator->EmitLdObjProto(Js::OpCode::LdHomeObjProto, funcInfo->superRegister, funcInfo);
+                byteCodeGenerator->Writer()->PatchablePropertyWithThisPtr(Js::OpCode::LdSuperFld, pnode->location, tmpReg, funcInfo->thisPointerRegister, cacheId, isConstructorCall);
+            }
+            else
+            {
+                byteCodeGenerator->Writer()->PatchableProperty(Js::OpCode::LdFld, pnode->location, callObjLocation, cacheId, isConstructorCall);
             }
         }
 
@@ -10691,19 +11000,10 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
     {
         STARTSTATEMENET_IFTOPLEVEL(isTopLevel, pnode);
         Js::ByteCodeLabel doneLabel = byteCodeGenerator->Writer()->DefineLabel();
-        // For boolean expressions that compute a result, we have to burn a register for the result
-        // so that the back end can identify it cheaply as a single temp lifetime. Revisit this if we do
-        // full-on renaming in the back end.
+        // We use a single dest here for the whole generating boolean expr, because we were poorly
+        // optimizing the previous version where we had a dest for each level
         funcInfo->AcquireLoc(pnode);
-
-        Emit(pnode->sxBin.pnode1, byteCodeGenerator, funcInfo, false);
-        byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, pnode->location, pnode->sxBin.pnode1->location);
-        byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrTrue_A, doneLabel, pnode->sxBin.pnode1->location);
-        funcInfo->ReleaseLoc(pnode->sxBin.pnode1);
-
-        Emit(pnode->sxBin.pnode2, byteCodeGenerator, funcInfo, false);
-        byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, pnode->location, pnode->sxBin.pnode2->location);
-        funcInfo->ReleaseLoc(pnode->sxBin.pnode2);
+        EmitGeneratingBooleanExpression(pnode, doneLabel, true, doneLabel, true, pnode->location, byteCodeGenerator, funcInfo);
         byteCodeGenerator->Writer()->MarkLabel(doneLabel);
         ENDSTATEMENET_IFTOPLEVEL(isTopLevel, pnode);
         break;
@@ -10713,19 +11013,10 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
     {
         STARTSTATEMENET_IFTOPLEVEL(isTopLevel, pnode);
         Js::ByteCodeLabel doneLabel = byteCodeGenerator->Writer()->DefineLabel();
-        // For boolean expressions that compute a result, we have to burn a register for the result
-        // so that the back end can identify it cheaply as a single temp lifetime. Revisit this if we do
-        // full-on renaming in the back end.
+        // We use a single dest here for the whole generating boolean expr, because we were poorly
+        // optimizing the previous version where we had a dest for each level
         funcInfo->AcquireLoc(pnode);
-
-        Emit(pnode->sxBin.pnode1, byteCodeGenerator, funcInfo, false);
-        byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, pnode->location, pnode->sxBin.pnode1->location);
-        byteCodeGenerator->Writer()->BrReg1(Js::OpCode::BrFalse_A, doneLabel, pnode->sxBin.pnode1->location);
-        funcInfo->ReleaseLoc(pnode->sxBin.pnode1);
-
-        Emit(pnode->sxBin.pnode2, byteCodeGenerator, funcInfo, false);
-        byteCodeGenerator->Writer()->Reg2(Js::OpCode::Ld_A, pnode->location, pnode->sxBin.pnode2->location);
-        funcInfo->ReleaseLoc(pnode->sxBin.pnode2);
+        EmitGeneratingBooleanExpression(pnode, doneLabel, true, doneLabel, true, pnode->location, byteCodeGenerator, funcInfo);
         byteCodeGenerator->Writer()->MarkLabel(doneLabel);
         ENDSTATEMENET_IFTOPLEVEL(isTopLevel, pnode);
         break;
@@ -10866,7 +11157,7 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
 
             if (pnode->nop != knopVarDecl)
             {
-                Assert(sym->GetDecl() == pnode);
+                Assert(sym->GetDecl() == pnode || (sym->GetIsArguments() && !funcInfo->GetHasArguments()));
                 sym->SetNeedDeclaration(false);
             }
 
@@ -11466,6 +11757,13 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
             byteCodeGenerator->StartStatement(pnodeCatch);
             ParseNodePtr pnode1 = pnodeObj->sxParamPattern.pnode1;
             Assert(pnode1->IsPattern());
+
+            ByteCodeGenerator::TryScopeRecord tryRecForCatch(Js::OpCode::ResumeCatch, catchLabel);
+            if (funcInfo->byteCodeFunction->IsCoroutine())
+            {
+                byteCodeGenerator->tryScopeRecordsList.LinkToEnd(&tryRecForCatch);
+            }
+
             EmitAssignment(nullptr, pnode1, location, byteCodeGenerator, funcInfo);
             byteCodeGenerator->EndStatement(pnodeCatch);
         }
@@ -11482,12 +11780,12 @@ void Emit(ParseNode *pnode, ByteCodeGenerator *byteCodeGenerator, FuncInfo *func
             byteCodeGenerator->StartStatement(pnodeCatch);
             byteCodeGenerator->Writer()->Empty(Js::OpCode::Nop);
             byteCodeGenerator->EndStatement(pnodeCatch);
-        }
 
-        ByteCodeGenerator::TryScopeRecord tryRecForCatch(Js::OpCode::ResumeCatch, catchLabel);
-        if (funcInfo->byteCodeFunction->IsCoroutine())
-        {
-            byteCodeGenerator->tryScopeRecordsList.LinkToEnd(&tryRecForCatch);
+            ByteCodeGenerator::TryScopeRecord tryRecForCatch(Js::OpCode::ResumeCatch, catchLabel);
+            if (funcInfo->byteCodeFunction->IsCoroutine())
+            {
+                byteCodeGenerator->tryScopeRecordsList.LinkToEnd(&tryRecForCatch);
+            }
         }
 
         Emit(pnodeCatch->sxCatch.pnodeBody, byteCodeGenerator, funcInfo, fReturnValue);

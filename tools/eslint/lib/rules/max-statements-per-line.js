@@ -5,6 +5,12 @@
 "use strict";
 
 //------------------------------------------------------------------------------
+// Requirements
+//------------------------------------------------------------------------------
+
+const astUtils = require("../ast-utils");
+
+//------------------------------------------------------------------------------
 // Rule Definition
 //------------------------------------------------------------------------------
 
@@ -22,7 +28,7 @@ module.exports = {
                 properties: {
                     max: {
                         type: "integer",
-                        minimum: 0
+                        minimum: 1
                     }
                 },
                 additionalProperties: false
@@ -35,9 +41,11 @@ module.exports = {
         const sourceCode = context.getSourceCode(),
             options = context.options[0] || {},
             maxStatementsPerLine = typeof options.max !== "undefined" ? options.max : 1,
-            message = "This line has too many statements. Maximum allowed is " + maxStatementsPerLine + ".";
+            message = "This line has {{numberOfStatementsOnThisLine}} {{statements}}. Maximum allowed is {{maxStatementsPerLine}}.";
+
         let lastStatementLine = 0,
-            numberOfStatementsOnThisLine = 0;
+            numberOfStatementsOnThisLine = 0,
+            firstExtraStatement;
 
         //--------------------------------------------------------------------------
         // Helpers
@@ -46,18 +54,33 @@ module.exports = {
         const SINGLE_CHILD_ALLOWED = /^(?:(?:DoWhile|For|ForIn|ForOf|If|Labeled|While)Statement|Export(?:Default|Named)Declaration)$/;
 
         /**
+         * Reports with the first extra statement, and clears it.
+         *
+         * @returns {void}
+         */
+        function reportFirstExtraStatementAndClear() {
+            if (firstExtraStatement) {
+                context.report({
+                    node: firstExtraStatement,
+                    message,
+                    data: {
+                        numberOfStatementsOnThisLine,
+                        maxStatementsPerLine,
+                        statements: numberOfStatementsOnThisLine === 1 ? "statement" : "statements"
+                    }
+                });
+            }
+            firstExtraStatement = null;
+        }
+
+        /**
          * Gets the actual last token of a given node.
          *
          * @param {ASTNode} node - A node to get. This is a node except EmptyStatement.
          * @returns {Token} The actual last token.
          */
         function getActualLastToken(node) {
-            let lastToken = sourceCode.getLastToken(node);
-
-            if (lastToken.value === ";") {
-                lastToken = sourceCode.getTokenBefore(lastToken);
-            }
-            return lastToken;
+            return sourceCode.getLastToken(node, astUtils.isNotSemicolonToken);
         }
 
         /**
@@ -83,13 +106,14 @@ module.exports = {
             if (line === lastStatementLine) {
                 numberOfStatementsOnThisLine += 1;
             } else {
+                reportFirstExtraStatementAndClear();
                 numberOfStatementsOnThisLine = 1;
                 lastStatementLine = line;
             }
 
             // Reports if the node violated this rule.
             if (numberOfStatementsOnThisLine === maxStatementsPerLine + 1) {
-                context.report({node, message});
+                firstExtraStatement = firstExtraStatement || node;
             }
         }
 
@@ -104,6 +128,7 @@ module.exports = {
 
             // Update state.
             if (line !== lastStatementLine) {
+                reportFirstExtraStatementAndClear();
                 numberOfStatementsOnThisLine = 1;
                 lastStatementLine = line;
             }
@@ -161,14 +186,7 @@ module.exports = {
             "ExportNamedDeclaration:exit": leaveStatement,
             "ExportDefaultDeclaration:exit": leaveStatement,
             "ExportAllDeclaration:exit": leaveStatement,
-
-            // For backward compatibility.
-            // Empty blocks should be warned if `{max: 0}` was given.
-            BlockStatement: function reportIfZero(node) {
-                if (maxStatementsPerLine === 0 && node.body.length === 0) {
-                    context.report({node, message});
-                }
-            }
+            "Program:exit": reportFirstExtraStatementAndClear
         };
     }
 };

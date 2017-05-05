@@ -12,13 +12,13 @@
 namespace Js
 {
     JavascriptDate::JavascriptDate(double value, DynamicType * type)
-        : DynamicObject(type), m_date(value, type->GetScriptContext())
+        : DynamicObject(type), m_date(value)
     {
         Assert(IsDateTypeId(type->GetTypeId()));
     }
 
     JavascriptDate::JavascriptDate(DynamicType * type)
-        : DynamicObject(type), m_date(0, type->GetScriptContext())
+        : DynamicObject(type), m_date(0)
     {
         Assert(type->GetTypeId() == TypeIds_Date);
     }
@@ -88,10 +88,10 @@ namespace Js
 
             // ES5 15.9.2.1: Date() should returns a string exactly the same as (new Date().toString()).
             JavascriptDate* pDate = NewInstanceAsConstructor(args, scriptContext, /* forceCurrentDate */ true);
-            JavascriptString* res = JavascriptDate::ToString(pDate);
+            JavascriptString* res = JavascriptDate::ToString(pDate, scriptContext);
 
 #if ENABLE_TTD
-            if(scriptContext->ShouldPerformDebugAction())
+            if(scriptContext->ShouldPerformReplayAction())
             {
                 scriptContext->GetThreadContext()->TTDLog->ReplayDateStringEvent(scriptContext, &res);
             }
@@ -137,7 +137,7 @@ namespace Js
             double resTime = DateImplementation::NowFromHiResTimer(scriptContext);
 
 #if ENABLE_TTD
-            if(scriptContext->ShouldPerformDebugAction())
+            if(scriptContext->ShouldPerformReplayAction())
             {
                 scriptContext->GetThreadContext()->TTDLog->ReplayDateTimeEvent(&resTime);
             }
@@ -228,7 +228,7 @@ namespace Js
             values[3] * 3600000 + values[4] * 60000 + values[5] * 1000 + values[6]);
 
         // Set the time.
-        pDate->m_date.SetTvLcl(timeValue);
+        pDate->m_date.SetTvLcl(timeValue, scriptContext);
 
         return pDate;
     }
@@ -298,7 +298,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetDate();
+            return date->m_date.GetDate(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -325,7 +325,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetDay();
+            return date->m_date.GetDay(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -352,7 +352,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetFullYear();
+            return date->m_date.GetFullYear(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -379,7 +379,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetYear();
+            return date->m_date.GetYear(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -406,7 +406,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetHours();
+            return date->m_date.GetHours(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -433,7 +433,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetDateMilliSeconds();
+            return date->m_date.GetDateMilliSeconds(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -460,7 +460,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetMinutes();
+            return date->m_date.GetMinutes(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -487,7 +487,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetMonth();
+            return date->m_date.GetMonth(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -514,7 +514,7 @@ namespace Js
 
         if (!date->m_date.IsNaN())
         {
-            return date->m_date.GetSeconds();
+            return date->m_date.GetSeconds(scriptContext);
         }
         return scriptContext->GetLibrary()->GetNaN();
     }
@@ -806,7 +806,7 @@ namespace Js
         double dblRetVal = DateImplementation::NowInMilliSeconds(scriptContext);
 
 #if ENABLE_TTD
-        if(scriptContext->ShouldPerformDebugAction())
+        if(scriptContext->ShouldPerformReplayAction())
         {
             scriptContext->GetThreadContext()->TTDLog->ReplayDateTimeEvent(&dblRetVal);
         }
@@ -837,22 +837,7 @@ namespace Js
 
     double JavascriptDate::ParseHelper(ScriptContext *scriptContext, JavascriptString *str)
     {
-#ifdef ENABLE_BASIC_TELEMETRY
-        double milliseconds = -1;
-        try
-        {
-            milliseconds = DateImplementation::UtcTimeFromStr(scriptContext, str);
-            scriptContext->GetTelemetry().GetKnownMethodTelemetry().JavascriptDate_ParseHelper(scriptContext, str, milliseconds, false);
-        }
-        catch(...)
-        {
-            scriptContext->GetTelemetry().GetKnownMethodTelemetry().JavascriptDate_ParseHelper(scriptContext, str, milliseconds, true);
-            throw;
-        }
-        return milliseconds;
-#else
         return DateImplementation::UtcTimeFromStr(scriptContext, str);
-#endif
     }
 
     Var JavascriptDate::EntrySetDate(RecyclableObject* function, CallInfo callInfo, ...)
@@ -1262,7 +1247,7 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
         return date->m_date.GetString(
-            DateImplementation::DateStringFormat::Default,
+            DateImplementation::DateStringFormat::Default, scriptContext,
             DateImplementation::DateTimeFlag::NoTime);
     }
 
@@ -1274,7 +1259,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(DateToISOStringCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Date_Prototype_toISOString);
 
         if (args.Info.Count == 0 || !JavascriptDate::Is(args[0]))
         {
@@ -1288,7 +1273,7 @@ namespace Js
         JavascriptDate* date = JavascriptDate::FromVar(args[0]);
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
-        return date->m_date.GetISOString();
+        return date->m_date.GetISOString(scriptContext);
     }
 
     Var JavascriptDate::EntryToJSON(RecyclableObject* function, CallInfo callInfo, ...)
@@ -1329,7 +1314,7 @@ namespace Js
             JavascriptError::ThrowTypeError(scriptContext, JSERR_Property_NeedFunction, scriptContext->GetPropertyName(PropertyIds::toISOString)->GetBuffer());
         }
         RecyclableObject* toISOFunc = RecyclableObject::FromVar(toISO);
-        return CALL_FUNCTION(toISOFunc, CallInfo(1), thisObj);
+        return CALL_FUNCTION(scriptContext->GetThreadContext(), toISOFunc, CallInfo(1), thisObj);
     }
 
     Var JavascriptDate::EntryToLocaleDateString(RecyclableObject* function, CallInfo callInfo, ...)
@@ -1378,7 +1363,7 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
         return date->m_date.GetString(
-            DateImplementation::DateStringFormat::Locale,
+            DateImplementation::DateStringFormat::Locale, scriptContext,
             DateImplementation::DateTimeFlag::NoTime);
     }
 
@@ -1426,18 +1411,20 @@ namespace Js
 #endif
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
-        return JavascriptDate::ToLocaleString(date);
+        return JavascriptDate::ToLocaleString(date, scriptContext);
     }
 
-    JavascriptString* JavascriptDate::ToLocaleString(JavascriptDate* date)
+    JavascriptString* JavascriptDate::ToLocaleString(JavascriptDate* date,
+        ScriptContext* requestContext)
     {
-        return date->m_date.GetString(DateImplementation::DateStringFormat::Locale);
+        return date->m_date.GetString(DateImplementation::DateStringFormat::Locale, requestContext);
     }
 
-    JavascriptString* JavascriptDate::ToString(JavascriptDate* date)
+    JavascriptString* JavascriptDate::ToString(JavascriptDate* date,
+        ScriptContext* requestContext)
     {
         Assert(date);
-        return date->m_date.GetString(DateImplementation::DateStringFormat::Default);
+        return date->m_date.GetString(DateImplementation::DateStringFormat::Default, requestContext);
     }
 
     Var JavascriptDate::EntryToLocaleTimeString(RecyclableObject* function, CallInfo callInfo, ...)
@@ -1485,7 +1472,7 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
         return date->m_date.GetString(
-            DateImplementation::DateStringFormat::Locale,
+            DateImplementation::DateStringFormat::Locale, scriptContext,
             DateImplementation::DateTimeFlag::NoDate);
     }
 
@@ -1512,7 +1499,7 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
         return date->m_date.GetString(
-            DateImplementation::DateStringFormat::Default,
+            DateImplementation::DateStringFormat::Default, scriptContext,
             DateImplementation::DateTimeFlag::NoDate);
     }
 
@@ -1548,7 +1535,7 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
         return date->m_date.GetString(
-            DateImplementation::DateStringFormat::GMT,
+            DateImplementation::DateStringFormat::GMT, scriptContext,
             DateImplementation::DateTimeFlag::None);
     }
 
@@ -1598,7 +1585,7 @@ namespace Js
         JavascriptDate* date = JavascriptDate::FromVar(args[0]);
 
         AssertMsg(args.Info.Count > 0, "Negative argument count");
-        return JavascriptDate::ToString(date);
+        return JavascriptDate::ToString(date, scriptContext);
     }
 
     BOOL JavascriptDate::TryInvokeRemotely(JavascriptMethod entryPoint, ScriptContext * scriptContext, Arguments & args, Var * result)
@@ -1621,7 +1608,7 @@ namespace Js
 
     void JavascriptDate::ExtractSnapObjectDataInto(TTD::NSSnapObjects::SnapObject* objData, TTD::SlabAllocator& alloc)
     {
-        AssertMsg(this->GetTypeId() == TypeIds_Date, "We don't handle WinRT or other types of dates yet!");
+        TTDAssert(this->GetTypeId() == TypeIds_Date, "We don't handle WinRT or other types of dates yet!");
 
         double* millis = alloc.SlabAllocateStruct<double>();
         *millis = m_date.GetMilliSeconds();
@@ -1643,7 +1630,8 @@ namespace Js
     BOOL JavascriptDate::GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext)
     {
         ENTER_PINNED_SCOPE(JavascriptString, valueStr);
-        valueStr = this->m_date.GetString(DateImplementation::DateStringFormat::Default);
+        valueStr = this->m_date.GetString(
+            DateImplementation::DateStringFormat::Default, requestContext);
         stringBuilder->Append(valueStr->GetString(), valueStr->GetLength());
         LEAVE_PINNED_SCOPE();
         return TRUE;

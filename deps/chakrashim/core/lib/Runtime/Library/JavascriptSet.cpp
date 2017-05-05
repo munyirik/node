@@ -48,7 +48,7 @@ namespace Js
         Var newTarget = callInfo.Flags & CallFlags_NewTarget ? args.Values[args.Info.Count] : args[0];
         bool isCtorSuperCall = (callInfo.Flags & CallFlags_New) && newTarget != nullptr && !JavascriptOperators::IsUndefined(newTarget);
         Assert(isCtorSuperCall || !(callInfo.Flags & CallFlags_New) || args[0] == nullptr);
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(SetCount);
+        CHAKRATEL_LANGSTATS_INC_DATACOUNT(ES6_Set);
 
         JavascriptSet* setObject = nullptr;
 
@@ -89,7 +89,7 @@ namespace Js
         if (iter != nullptr)
         {
             JavascriptOperators::DoIteratorStepAndValue(iter, scriptContext, [&](Var nextItem) {
-                CALL_FUNCTION(adder, CallInfo(CallFlags_Value, 2), setObject, nextItem);
+                CALL_FUNCTION(scriptContext->GetThreadContext(), adder, CallInfo(CallFlags_Value, 2), setObject, nextItem);
             });
         }
 
@@ -195,7 +195,7 @@ namespace Js
         {
             Var value = iterator.Current();
 
-            CALL_FUNCTION(callBackFn, CallInfo(CallFlags_Value, 4), thisArg, value, value, args[0]);
+            CALL_FUNCTION(scriptContext->GetThreadContext(), callBackFn, CallInfo(CallFlags_Value, 4), thisArg, value, value, args[0]);
         }
 
         return scriptContext->GetLibrary()->GetUndefined();

@@ -13,12 +13,14 @@
 #include "include/v8.h"
 #include "src/allocation.h"
 #include "src/base/bits.h"
+#include "src/base/compiler-specific.h"
 #include "src/base/logging.h"
 #include "src/base/macros.h"
 #include "src/base/platform/platform.h"
 #include "src/globals.h"
 #include "src/list.h"
 #include "src/vector.h"
+#include "src/zone/zone.h"
 
 namespace v8 {
 namespace internal {
@@ -36,6 +38,11 @@ inline int HexValue(uc32 c) {
   return -1;
 }
 
+inline char HexCharOfValue(int value) {
+  DCHECK(0 <= value && value <= 16);
+  if (value < 10) return value + '0';
+  return value - 10 + 'A';
+}
 
 inline int BoolToInt(bool b) { return b ? 1 : 0; }
 
@@ -194,6 +201,23 @@ T Min(T a, T b) {
   return a < b ? a : b;
 }
 
+// Returns the maximum of the two parameters according to JavaScript semantics.
+template <typename T>
+T JSMax(T x, T y) {
+  if (std::isnan(x)) return x;
+  if (std::isnan(y)) return y;
+  if (std::signbit(x) < std::signbit(y)) return x;
+  return x > y ? x : y;
+}
+
+// Returns the maximum of the two parameters according to JavaScript semantics.
+template <typename T>
+T JSMin(T x, T y) {
+  if (std::isnan(x)) return x;
+  if (std::isnan(y)) return y;
+  if (std::signbit(x) < std::signbit(y)) return y;
+  return x > y ? y : x;
+}
 
 // Returns the absolute value of its argument.
 template <typename T>
@@ -211,6 +235,10 @@ inline double Floor(double x) {
 }
 
 inline double Pow(double x, double y) {
+  if (y == 0.0) return 1.0;
+  if (std::isnan(y) || ((x == 1 || x == -1) && std::isinf(y))) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
 #if (defined(__MINGW64_VERSION_MAJOR) &&                              \
      (!defined(__MINGW64_VERSION_RC) || __MINGW64_VERSION_RC < 1)) || \
     defined(V8_OS_AIX)
@@ -299,8 +327,9 @@ class BitFieldBase {
   static T decode(U value) {
     return static_cast<T>((value & kMask) >> shift);
   }
-};
 
+  STATIC_ASSERT((kNext - 1) / 8 < sizeof(U));
+};
 
 template <class T, int shift, int size>
 class BitField8 : public BitFieldBase<T, shift, size, uint8_t> {};
@@ -409,7 +438,7 @@ void init_memcopy_functions(Isolate* isolate);
 const int kMinComplexMemCopy = 64;
 
 // Copy memory area. No restrictions.
-void MemMove(void* dest, const void* src, size_t size);
+V8_EXPORT_PRIVATE void MemMove(void* dest, const void* src, size_t size);
 typedef void (*MemMoveFunction)(void* dest, const void* src, size_t size);
 
 // Keep the distinction of "move" vs. "copy" for the benefit of other
@@ -420,7 +449,7 @@ V8_INLINE void MemCopy(void* dest, const void* src, size_t size) {
 #elif defined(V8_HOST_ARCH_ARM)
 typedef void (*MemCopyUint8Function)(uint8_t* dest, const uint8_t* src,
                                      size_t size);
-extern MemCopyUint8Function memcopy_uint8_function;
+V8_EXPORT_PRIVATE extern MemCopyUint8Function memcopy_uint8_function;
 V8_INLINE void MemCopyUint8Wrapper(uint8_t* dest, const uint8_t* src,
                                    size_t chars) {
   memcpy(dest, src, chars);
@@ -431,7 +460,8 @@ V8_INLINE void MemCopy(void* dest, const void* src, size_t size) {
   (*memcopy_uint8_function)(reinterpret_cast<uint8_t*>(dest),
                             reinterpret_cast<const uint8_t*>(src), size);
 }
-V8_INLINE void MemMove(void* dest, const void* src, size_t size) {
+V8_EXPORT_PRIVATE V8_INLINE void MemMove(void* dest, const void* src,
+                                         size_t size) {
   memmove(dest, src, size);
 }
 
@@ -449,7 +479,7 @@ V8_INLINE void MemCopyUint16Uint8(uint16_t* dest, const uint8_t* src,
 #elif defined(V8_HOST_ARCH_MIPS)
 typedef void (*MemCopyUint8Function)(uint8_t* dest, const uint8_t* src,
                                      size_t size);
-extern MemCopyUint8Function memcopy_uint8_function;
+V8_EXPORT_PRIVATE extern MemCopyUint8Function memcopy_uint8_function;
 V8_INLINE void MemCopyUint8Wrapper(uint8_t* dest, const uint8_t* src,
                                    size_t chars) {
   memcpy(dest, src, chars);
@@ -460,7 +490,8 @@ V8_INLINE void MemCopy(void* dest, const void* src, size_t size) {
   (*memcopy_uint8_function)(reinterpret_cast<uint8_t*>(dest),
                             reinterpret_cast<const uint8_t*>(src), size);
 }
-V8_INLINE void MemMove(void* dest, const void* src, size_t size) {
+V8_EXPORT_PRIVATE V8_INLINE void MemMove(void* dest, const void* src,
+                                         size_t size) {
   memmove(dest, src, size);
 }
 #else
@@ -468,7 +499,8 @@ V8_INLINE void MemMove(void* dest, const void* src, size_t size) {
 V8_INLINE void MemCopy(void* dest, const void* src, size_t size) {
   memcpy(dest, src, size);
 }
-V8_INLINE void MemMove(void* dest, const void* src, size_t size) {
+V8_EXPORT_PRIVATE V8_INLINE void MemMove(void* dest, const void* src,
+                                         size_t size) {
   memmove(dest, src, size);
 }
 const int kMinComplexMemCopy = 16 * kPointerSize;
@@ -891,7 +923,7 @@ class BailoutId {
   bool operator==(const BailoutId& other) const { return id_ == other.id_; }
   bool operator!=(const BailoutId& other) const { return id_ != other.id_; }
   friend size_t hash_value(BailoutId);
-  friend std::ostream& operator<<(std::ostream&, BailoutId);
+  V8_EXPORT_PRIVATE friend std::ostream& operator<<(std::ostream&, BailoutId);
 
  private:
   static const int kNoneId = -1;
@@ -915,59 +947,25 @@ class BailoutId {
   int id_;
 };
 
-class TokenDispenserForFinally {
- public:
-  int GetBreakContinueToken() { return next_token_++; }
-  static const int kFallThroughToken = 0;
-  static const int kThrowToken = 1;
-  static const int kReturnToken = 2;
-
-  static const int kFirstBreakContinueToken = 3;
-  static const int kInvalidToken = -1;
-
- private:
-  int next_token_ = kFirstBreakContinueToken;
-};
 
 // ----------------------------------------------------------------------------
 // I/O support.
 
-#if __GNUC__ >= 4
-// On gcc we can ask the compiler to check the types of %d-style format
-// specifiers and their associated arguments.  TODO(erikcorry) fix this
-// so it works on MacOSX.
-#if defined(__MACH__) && defined(__APPLE__)
-#define PRINTF_CHECKING
-#define FPRINTF_CHECKING
-#define PRINTF_METHOD_CHECKING
-#define FPRINTF_METHOD_CHECKING
-#else  // MacOsX.
-#define PRINTF_CHECKING __attribute__ ((format (printf, 1, 2)))
-#define FPRINTF_CHECKING __attribute__ ((format (printf, 2, 3)))
-#define PRINTF_METHOD_CHECKING __attribute__ ((format (printf, 2, 3)))
-#define FPRINTF_METHOD_CHECKING __attribute__ ((format (printf, 3, 4)))
-#endif
-#else
-#define PRINTF_CHECKING
-#define FPRINTF_CHECKING
-#define PRINTF_METHOD_CHECKING
-#define FPRINTF_METHOD_CHECKING
-#endif
-
 // Our version of printf().
-void PRINTF_CHECKING PrintF(const char* format, ...);
-void FPRINTF_CHECKING PrintF(FILE* out, const char* format, ...);
+V8_EXPORT_PRIVATE void PRINTF_FORMAT(1, 2) PrintF(const char* format, ...);
+void PRINTF_FORMAT(2, 3) PrintF(FILE* out, const char* format, ...);
 
 // Prepends the current process ID to the output.
-void PRINTF_CHECKING PrintPID(const char* format, ...);
+void PRINTF_FORMAT(1, 2) PrintPID(const char* format, ...);
 
 // Prepends the current process ID and given isolate pointer to the output.
-void PrintIsolate(void* isolate, const char* format, ...);
+void PRINTF_FORMAT(2, 3) PrintIsolate(void* isolate, const char* format, ...);
 
 // Safe formatting print. Ensures that str is always null-terminated.
 // Returns the number of chars written, or -1 if output was truncated.
-int FPRINTF_CHECKING SNPrintF(Vector<char> str, const char* format, ...);
-int VSNPrintF(Vector<char> str, const char* format, va_list args);
+int PRINTF_FORMAT(2, 3) SNPrintF(Vector<char> str, const char* format, ...);
+int PRINTF_FORMAT(2, 0)
+    VSNPrintF(Vector<char> str, const char* format, va_list args);
 
 void StrNCpy(Vector<char> dest, const char* src, size_t n);
 
@@ -1114,13 +1112,6 @@ inline void MemsetPointer(T** dest, U* value, int counter) {
 #define STOS "stosq"
 #endif
 #endif
-#if defined(__native_client__)
-  // This STOS sequence does not validate for x86_64 Native Client.
-  // Here we #undef STOS to force use of the slower C version.
-  // TODO(bradchen): Profile V8 and implement a faster REP STOS
-  // here if the profile indicates it matters.
-#undef STOS
-#endif
 
 #if defined(MEMORY_SANITIZER)
   // MemorySanitizer does not understand inline assembly.
@@ -1147,9 +1138,9 @@ inline void MemsetPointer(T** dest, U* value, int counter) {
 // Simple support to read a file into a 0-terminated C-string.
 // The returned buffer must be freed by the caller.
 // On return, *exits tells whether the file existed.
-Vector<const char> ReadFile(const char* filename,
-                            bool* exists,
-                            bool verbose = true);
+V8_EXPORT_PRIVATE Vector<const char> ReadFile(const char* filename,
+                                              bool* exists,
+                                              bool verbose = true);
 Vector<const char> ReadFile(FILE* file,
                             bool* exists,
                             bool verbose = true);
@@ -1470,10 +1461,11 @@ class StringBuilder : public SimpleStringBuilder {
   StringBuilder(char* buffer, int size) : SimpleStringBuilder(buffer, size) { }
 
   // Add formatted contents to the builder just like printf().
-  void AddFormatted(const char* format, ...);
+  void PRINTF_FORMAT(2, 3) AddFormatted(const char* format, ...);
 
   // Add formatted contents like printf based on a va_list.
-  void AddFormattedList(const char* format, va_list list);
+  void PRINTF_FORMAT(2, 0) AddFormattedList(const char* format, va_list list);
+
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(StringBuilder);
 };
@@ -1520,22 +1512,26 @@ inline uintptr_t GetCurrentStackPosition() {
 
 template <typename V>
 static inline V ReadUnalignedValue(const void* p) {
-#if !(V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64)
+#if !(V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM)
   return *reinterpret_cast<const V*>(p);
-#else
+#else   // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM
   V r;
   memmove(&r, p, sizeof(V));
   return r;
-#endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64
+#endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM
 }
 
 template <typename V>
 static inline void WriteUnalignedValue(void* p, V value) {
-#if !(V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64)
+#if !(V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM)
   *(reinterpret_cast<V*>(p)) = value;
-#else   // V8_TARGET_ARCH_MIPS
+#else   // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM
   memmove(p, &value, sizeof(V));
-#endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64
+#endif  // V8_TARGET_ARCH_MIPS || V8_TARGET_ARCH_MIPS64 || V8_TARGET_ARCH_ARM
+}
+
+static inline double ReadFloatValue(const void* p) {
+  return ReadUnalignedValue<float>(p);
 }
 
 static inline double ReadDoubleValue(const void* p) {
@@ -1561,6 +1557,150 @@ static inline uint32_t ReadUnalignedUInt32(const void* p) {
 static inline void WriteUnalignedUInt32(void* p, uint32_t value) {
   WriteUnalignedValue(p, value);
 }
+
+template <typename V>
+static inline V ReadLittleEndianValue(const void* p) {
+#if defined(V8_TARGET_LITTLE_ENDIAN)
+  return ReadUnalignedValue<V>(p);
+#elif defined(V8_TARGET_BIG_ENDIAN)
+  V ret = 0;
+  const byte* src = reinterpret_cast<const byte*>(p);
+  byte* dst = reinterpret_cast<byte*>(&ret);
+  for (size_t i = 0; i < sizeof(V); i++) {
+    dst[i] = src[sizeof(V) - i - 1];
+  }
+  return ret;
+#endif  // V8_TARGET_LITTLE_ENDIAN
+}
+
+template <typename V>
+static inline void WriteLittleEndianValue(void* p, V value) {
+#if defined(V8_TARGET_LITTLE_ENDIAN)
+  WriteUnalignedValue<V>(p, value);
+#elif defined(V8_TARGET_BIG_ENDIAN)
+  byte* src = reinterpret_cast<byte*>(&value);
+  byte* dst = reinterpret_cast<byte*>(p);
+  for (size_t i = 0; i < sizeof(V); i++) {
+    dst[i] = src[sizeof(V) - i - 1];
+  }
+#endif  // V8_TARGET_LITTLE_ENDIAN
+}
+
+// Represents a linked list that threads through the nodes in the linked list.
+// Entries in the list are pointers to nodes. The nodes need to have a T**
+// next() method that returns the location where the next value is stored.
+template <typename T>
+class ThreadedList final {
+ public:
+  ThreadedList() : head_(nullptr), tail_(&head_) {}
+  void Add(T* v) {
+    DCHECK_NULL(*tail_);
+    DCHECK_NULL(*v->next());
+    *tail_ = v;
+    tail_ = v->next();
+  }
+
+  void Clear() {
+    head_ = nullptr;
+    tail_ = &head_;
+  }
+
+  class Iterator final {
+   public:
+    Iterator& operator++() {
+      entry_ = (*entry_)->next();
+      return *this;
+    }
+    bool operator!=(const Iterator& other) { return entry_ != other.entry_; }
+    T* operator*() { return *entry_; }
+    Iterator& operator=(T* entry) {
+      T* next = *(*entry_)->next();
+      *entry->next() = next;
+      *entry_ = entry;
+      return *this;
+    }
+
+   private:
+    explicit Iterator(T** entry) : entry_(entry) {}
+
+    T** entry_;
+
+    friend class ThreadedList;
+  };
+
+  class ConstIterator final {
+   public:
+    ConstIterator& operator++() {
+      entry_ = (*entry_)->next();
+      return *this;
+    }
+    bool operator!=(const ConstIterator& other) {
+      return entry_ != other.entry_;
+    }
+    const T* operator*() const { return *entry_; }
+
+   private:
+    explicit ConstIterator(T* const* entry) : entry_(entry) {}
+
+    T* const* entry_;
+
+    friend class ThreadedList;
+  };
+
+  Iterator begin() { return Iterator(&head_); }
+  Iterator end() { return Iterator(tail_); }
+
+  ConstIterator begin() const { return ConstIterator(&head_); }
+  ConstIterator end() const { return ConstIterator(tail_); }
+
+  void Rewind(Iterator reset_point) {
+    tail_ = reset_point.entry_;
+    *tail_ = nullptr;
+  }
+
+  void MoveTail(ThreadedList<T>* parent, Iterator location) {
+    if (parent->end() != location) {
+      DCHECK_NULL(*tail_);
+      *tail_ = *location;
+      tail_ = parent->tail_;
+      parent->Rewind(location);
+    }
+  }
+
+  bool is_empty() const { return head_ == nullptr; }
+
+  // Slow. For testing purposes.
+  int LengthForTest() {
+    int result = 0;
+    for (Iterator t = begin(); t != end(); ++t) ++result;
+    return result;
+  }
+  T* AtForTest(int i) {
+    Iterator t = begin();
+    while (i-- > 0) ++t;
+    return *t;
+  }
+
+ private:
+  T* head_;
+  T** tail_;
+  DISALLOW_COPY_AND_ASSIGN(ThreadedList);
+};
+
+// Can be used to create a threaded list of |T|.
+template <typename T>
+class ThreadedListZoneEntry final : public ZoneObject {
+ public:
+  explicit ThreadedListZoneEntry(T value) : value_(value), next_(nullptr) {}
+
+  T value() { return value_; }
+  ThreadedListZoneEntry<T>** next() { return &next_; }
+
+ private:
+  T value_;
+  ThreadedListZoneEntry<T>* next_;
+  DISALLOW_COPY_AND_ASSIGN(ThreadedListZoneEntry);
+};
 
 }  // namespace internal
 }  // namespace v8

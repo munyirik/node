@@ -5,6 +5,12 @@
 "use strict";
 
 //------------------------------------------------------------------------------
+// Requirements
+//------------------------------------------------------------------------------
+
+const astUtils = require("../ast-utils");
+
+//------------------------------------------------------------------------------
 // Rule Definition
 //------------------------------------------------------------------------------
 
@@ -51,16 +57,13 @@ module.exports = {
          * @returns {Object} Tokens of arrow and before/after arrow.
          */
         function getTokens(node) {
-            let t = sourceCode.getFirstToken(node);
-            let before;
+            const arrow = sourceCode.getTokenBefore(node.body, astUtils.isArrowToken);
 
-            while (t.type !== "Punctuator" || t.value !== "=>") {
-                before = t;
-                t = sourceCode.getTokenAfter(t);
-            }
-            const after = sourceCode.getTokenAfter(t);
-
-            return { before, arrow: t, after };
+            return {
+                before: sourceCode.getTokenBefore(arrow),
+                arrow,
+                after: sourceCode.getTokenAfter(arrow)
+            };
         }
 
         /**

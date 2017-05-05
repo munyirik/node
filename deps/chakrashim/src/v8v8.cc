@@ -18,11 +18,14 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 // IN THE SOFTWARE.
 
+#include <algorithm>
 #include "v8.h"
 #include "v8chakra.h"
 #include "jsrtutils.h"
 #include "v8-debug.h"
-#include <algorithm>
+#include "libplatform/v8-tracing.h"
+#include "jsrtplatform.h"
+
 #ifdef UWP_DLL
 #include "..\..\src\node_version.h"
 #endif
@@ -32,7 +35,19 @@ namespace v8 {
 bool g_disposed = false;
 bool g_exposeGC = false;
 bool g_useStrict = false;
-ArrayBuffer::Allocator* g_arrayBufferAllocator = nullptr;
+bool g_disableIdleGc = false;
+bool g_trace_debug_json = false;
+
+HeapStatistics::HeapStatistics()
+    : total_heap_size_(0),
+      total_heap_size_executable_(0),
+      total_physical_size_(0),
+      total_available_size_(0),
+      used_heap_size_(0),
+      heap_size_limit_(0),
+      malloced_memory_(0),
+      peak_malloced_memory_(0),
+      does_zap_garbage_(0) {}
 
 const char *V8::GetVersion() {
   static char versionStr[32] = {};
@@ -116,14 +131,21 @@ void V8::SetFlagsFromCommandLine(int *argc, char **argv, bool remove_flags) {
       if (remove_flags) {
         argv[i] = nullptr;
       }
+    } else if (equals("--trace-debug-json", arg) ||
+      equals("--trace_debug_json", arg)) {
+      g_trace_debug_json = true;
+      if (remove_flags) {
+        argv[i] = nullptr;
+      }
     } else if (remove_flags &&
                (startsWith(
                  arg, "--debug")  // Ignore some flags to reduce unit test noise
                 || startsWith(arg, "--harmony")
-                || startsWith(arg, "--stack-size="))) {
+                || startsWith(arg, "--stack-size=")
+                || startsWith(arg, "--nolazy"))) {
       argv[i] = nullptr;
     } else if (equals("--help", arg)) {
-        char* helpText =
+        printf(
           "Options:\n"
           " --use_strict (enforce strict mode)\n"
           "     type: bool  default: false\n"
@@ -134,15 +156,14 @@ void V8::SetFlagsFromCommandLine(int *argc, char **argv, bool remove_flags) {
           " --harmony (Other flags are ignored in node running with "
           "chakracore)\n"
           " --debug (Ignored in node running with chakracore)\n"
-          " --stack-size (Ignored in node running with chakracore)\n";
-        fprintf(stdout, helpText);
+          " --stack-size (Ignored in node running with chakracore)\n");
         exit(0);
     }
   }
 
   if (remove_flags) {
     char** end = std::remove(argv + 1, argv + *argc, nullptr);
-    *argc = end - argv;
+    *argc = static_cast<int>(end - argv);
   }
 }
 
@@ -162,11 +183,6 @@ void V8::SetEntropySource(EntropySource entropy_source) {
   // CHAKRA-TODO
 }
 
-void V8::SetArrayBufferAllocator(ArrayBuffer::Allocator* allocator) {
-  CHAKRA_VERIFY(!g_arrayBufferAllocator);
-  g_arrayBufferAllocator = allocator;
-}
-
 bool V8::IsDead() {
   return g_disposed;
 }
@@ -174,7 +190,6 @@ bool V8::IsDead() {
 bool V8::Dispose() {
   g_disposed = true;
   jsrt::IsolateShim::DisposeAll();
-  Debug::Dispose();
   return true;
 }
 
@@ -198,4 +213,62 @@ void V8::ToLocalEmpty() {
   jsrt::Fatal("v8::ToLocalChecked: %s", "Empty MaybeLocal.");
 }
 
+namespace platform {
+  v8::Platform* CreateDefaultPlatform(int thread_pool_size) {
+    jsrt::DefaultPlatform* platform = new jsrt::DefaultPlatform();
+    return platform;
+  }
+
+  bool PumpMessageLoop(v8::Platform* platform, v8::Isolate* isolate) {
+    return static_cast<jsrt::DefaultPlatform*>(platform)->PumpMessageLoop(isolate);
+  }
+
+  void SetTracingController(
+      v8::Platform* platform,
+      v8::platform::tracing::TracingController* tracing_controller) {
+    jsrt::Unimplemented("TracingController");
+  }
+}  // namespace platform
+
+namespace platform {
+namespace tracing {
+  void TracingController::StopTracing() {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  void TracingController::StartTracing(TraceConfig*) {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  void TracingController::Initialize(TraceBuffer*) {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  void TraceConfig::AddIncludedCategory(char const*) {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  TraceObject* TraceBufferChunk::AddTraceEvent(size_t*) {
+    jsrt::Unimplemented("TracingController");
+    return 0;
+  }
+
+  void TraceBufferChunk::Reset(uint32_t) {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  TraceBufferChunk::TraceBufferChunk(uint32_t) {
+    jsrt::Unimplemented("TracingController");
+  }
+
+  TraceObject::~TraceObject() {
+    // Intentionally left empty to suppress warning C4722.
+  }
+
+  TraceWriter* TraceWriter::CreateJSONTraceWriter(std::ostream&) {
+    jsrt::Unimplemented("TracingController");
+    return 0;
+  }
+}  // namespace tracing
+}  // namespace platform
 }  // namespace v8

@@ -89,14 +89,8 @@ def npm_files(action):
     paths = [os.path.join(dirname, basename) for basename in basenames]
     action(paths, target_path + dirname[9:] + '/')
 
-  # create/remove symlink
-  link_path = abspath(install_path, 'bin/npm')
-  if action == uninstall:
-    action([link_path], 'bin/npm')
-  elif action == install:
-    try_symlink('../lib/node_modules/npm/bin/npm-cli.js', link_path)
-  else:
-    assert(0) # unhandled action type
+  # create/remove npm invoke script
+  action(['deps/chakrashim/npm'], 'bin/npm')
 
 def subdir_files(path, dest, action):
   ret = {}
@@ -133,6 +127,8 @@ def files(action):
   action(['src/node.stp'], 'share/systemtap/tapset/')
 
   action(['deps/v8/tools/gdbinit'], 'share/doc/node/')
+  action(['deps/v8/tools/lldbinit'], 'share/doc/node/')
+  action(['deps/v8/tools/lldb_commands.py'], 'share/doc/node/')
 
   if 'freebsd' in sys.platform or 'openbsd' in sys.platform:
     action(['doc/node.1'], 'man/man1/')
@@ -148,6 +144,8 @@ def headers(action):
     'common.gypi',
     'config.gypi',
     'src/node.h',
+    'src/node_api.h',
+    'src/node_api_types.h',
     'src/node_buffer.h',
     'src/node_object_wrap.h',
     'src/node_version.h',
@@ -157,15 +155,19 @@ def headers(action):
   if sys.platform.startswith('aix'):
     action(['out/Release/node.exp'], 'include/node/')
 
-  subdir_files('deps/v8/include', 'include/node/', action)
-
-  if 'false' == variables.get('node_shared_cares'):
-    subdir_files('deps/cares/include', 'include/node/', action)
+  if 'v8' == variables.get('node_engine'):
+    subdir_files('deps/v8/include', 'include/node/', action)
+  elif 'chakracore' == variables.get('node_engine'):
+    subdir_files('deps/chakrashim/include', 'include/node/', action)
+    subdir_files('deps/chakrashim/src', 'include/node/', action)
+  else:
+    raise RuntimeError('Unknown engine: %s\n' % variables.get('node_engine'))
 
   if 'false' == variables.get('node_shared_libuv'):
     subdir_files('deps/uv/include', 'include/node/', action)
 
-  if 'false' == variables.get('node_shared_openssl'):
+  if 'true' == variables.get('node_use_openssl') and \
+     'false' == variables.get('node_shared_openssl'):
     subdir_files('deps/openssl/openssl/include/openssl', 'include/node/openssl/', action)
     subdir_files('deps/openssl/config/archs', 'include/node/openssl/archs', action)
     action(['deps/openssl/config/opensslconf.h'], 'include/node/openssl/')

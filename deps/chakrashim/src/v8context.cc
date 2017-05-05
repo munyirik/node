@@ -20,6 +20,10 @@
 
 #include "v8.h"
 #include "jsrtutils.h"
+#include "v8-debug.h"
+#include "jsrtdebug.h"
+#include "jsrtinspector.h"
+
 #include <assert.h>
 
 namespace v8 {
@@ -41,12 +45,14 @@ Local<Object> Context::Global() {
   // V8 Global is actually proxy where the actual global is it's prototype.
   // No need to create handle here, the context will keep it alive
   return Local<Object>(static_cast<Object *>(
-    jsrt::IsolateShim::GetContextShim((JsContextRef*)this)->GetProxyOfGlobal()));
+    jsrt::IsolateShim::GetContextShim(
+      reinterpret_cast<JsContextRef *>(this))->GetProxyOfGlobal()));
 }
 
 extern bool g_exposeGC;
 
 Local<Context> Context::New(Isolate* external_isolate,
+                            bool useGlobalTTState,
                             ExtensionConfiguration* extensions,
                             Handle<ObjectTemplate> global_template,
                             Handle<Value> global_object) {
@@ -67,11 +73,57 @@ Local<Context> Context::New(Isolate* external_isolate,
 
   JsContextRef context;
   jsrt::IsolateShim* isoShim = jsrt::IsolateShim::FromIsolate(external_isolate);
-  if (!isoShim->NewContext(&context, g_exposeGC, *glob)) {
+  if (!isoShim->NewContext(&context, g_exposeGC, useGlobalTTState, *glob)) {
     return Local<Context>();
   }
 
-  return Local<Context>::New(external_isolate, static_cast<Context *>(context));
+  Local<Context> thisContext = Local<Context>::New(
+      external_isolate, static_cast<Context *>(context));
+
+  bool debugEnabled = jsrt::Debugger::IsDebugEnabled();
+  bool inspectorEnabled = jsrt::Inspector::IsInspectorEnabled();
+
+  if ((debugEnabled || inspectorEnabled) &&
+      isoShim->debugContext == nullptr) {
+    // If JavaScript debugging APIs need to be exposed then make sure
+    // debugContext is available and chakra_debug.js or chakra_inspector.js
+    // are compiled. Inject v8debug object from chakra_debug.js or
+    // chakra_inspector.js into this context's global object.
+    JsContextRef debugContextRef;
+    isoShim->NewContext(&debugContextRef, false, false, *glob);
+    jsrt::ContextShim* debugContextShim = isoShim->GetContextShim(
+        debugContextRef);
+
+    isoShim->debugContext = debugContextShim;
+
+    {
+      Local<Context> debugContextLocal = Local<Context>::New(
+          external_isolate, static_cast<Context *>(debugContextRef));
+
+      Context::Scope context_scope(debugContextLocal);
+
+      JsValueRef chakraDebugObject;
+      if (inspectorEnabled)
+      {
+        if (debugContextShim->ExecuteChakraInspectorShimJS(
+              &chakraDebugObject)) {
+          jsrt::Inspector::SetChakraDebugObject(chakraDebugObject);
+        }
+      }
+      else if (debugEnabled) {
+        if (debugContextShim->ExecuteChakraDebugShimJS(
+              &chakraDebugObject)) {
+          jsrt::Debugger::SetChakraDebugObject(chakraDebugObject);
+        }
+      }
+      else {
+        // This should never be reachable.
+        CHAKRA_ASSERT(false);
+      }
+    }
+  }
+
+  return thisContext;
 }
 
 Local<Context> Context::GetCurrent() {

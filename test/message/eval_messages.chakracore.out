@@ -1,41 +1,50 @@
 [eval]
 SyntaxError: 'with' statements are not allowed in strict mode
-   at exports.runInThisContext (vm.js:*)
+   at createScript (vm.js:*:*)
+   at runInThisContext (vm.js:*:*)
    at Anonymous function ([eval]-wrapper:*:*)
    at Module.prototype._compile (module.js:*:*)
+   at evalScript (bootstrap_node.js:*:*)
    at Anonymous function (bootstrap_node.js:*:*)
-   at _combinedTickCallback (internal/process/next_tick.js:*:*)
-   at _tickCallback (internal/process/next_tick.js:*:*)
+   at run (bootstrap_node.js:*:*)
+   at startup (bootstrap_node.js:*:*)
+   at Anonymous function (bootstrap_node.js:*:*)
 42
 42
 Error: hello
    at Global code ([eval]:1:1)
    at Script.prototype.runInThisContext (vm.js:*:*)      
-   at exports.runInThisContext (vm.js:*)
+   at runInThisContext (vm.js:*:*)
    at Anonymous function ([eval]-wrapper:*:*)
    at Module.prototype._compile (module.js:*:*)
+   at evalScript (bootstrap_node.js:*:*)
    at Anonymous function (bootstrap_node.js:*:*)
-   at _combinedTickCallback (internal/process/next_tick.js:*:*)
-   at _tickCallback (internal/process/next_tick.js:*:*)
+   at run (bootstrap_node.js:*:*)
+   at startup (bootstrap_node.js:*:*)
+   at Anonymous function (bootstrap_node.js:*:*)
 Error: hello
    at Global code ([eval]:1:15)
    at Script.prototype.runInThisContext (vm.js:*:*)   
-   at exports.runInThisContext (vm.js:*)
+   at runInThisContext (vm.js:*:*)
    at Anonymous function ([eval]-wrapper:*:*)
    at Module.prototype._compile (module.js:*:*)
+   at evalScript (bootstrap_node.js:*:*)
    at Anonymous function (bootstrap_node.js:*:*)
-   at _combinedTickCallback (internal/process/next_tick.js:*:*)
-   at _tickCallback (internal/process/next_tick.js:*:*)
+   at run (bootstrap_node.js:*:*)
+   at startup (bootstrap_node.js:*:*)
+   at Anonymous function (bootstrap_node.js:*:*)
 100
 ReferenceError: Variable undefined in strict mode
    at Global code ([eval]:1:28)
    at Script.prototype.runInThisContext (vm.js:*:*)      
-   at exports.runInThisContext (vm.js:*)
+   at runInThisContext (vm.js:*:*)
    at Anonymous function ([eval]-wrapper:*:*)
    at Module.prototype._compile (module.js:*:*)
+   at evalScript (bootstrap_node.js:*:*)
    at Anonymous function (bootstrap_node.js:*:*)
-   at _combinedTickCallback (internal/process/next_tick.js:*:*)
-   at _tickCallback (internal/process/next_tick.js:*:*)
+   at run (bootstrap_node.js:*:*)
+   at startup (bootstrap_node.js:*:*)
+   at Anonymous function (bootstrap_node.js:*:*)
 10
 10
 done

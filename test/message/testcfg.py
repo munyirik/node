@@ -111,7 +111,6 @@ class MessageTestConfiguration(test.TestConfiguration):
 
   def __init__(self, context, root):
     super(MessageTestConfiguration, self).__init__(context, root)
-    self.engine = context.engine
 
   def Ls(self, path):
     if isdir(path):
@@ -119,21 +118,21 @@ class MessageTestConfiguration(test.TestConfiguration):
     else:
         return []
 
-  def ListTests(self, current_path, path, arch, mode):
+  def ListTests(self, current_path, path, arch, mode, jsEngine):
     all_tests = [current_path + [t] for t in self.Ls(self.root)]
     result = []
     for test in all_tests:
       if self.Contains(path, test):
         file_prefix = join(self.root, reduce(join, test[1:], ""))
         file_path = file_prefix + ".js"
-        engine_output_path = file_prefix + (".%s.out" % self.engine)
+        engine_output_path = file_prefix + (".%s.out" % jsEngine)
         output_path = file_prefix + ".out"
         if exists(engine_output_path):
           output_path = engine_output_path
         else:
           if not exists(output_path):
-            print "Could not find %s or %s" % (output_path, engine_output_path)
-            continue
+            raise Exception("Could not find %s" % output_path)
+
         result.append(MessageTestCase(test, file_path, output_path,
                                       arch, mode, self.context, self))
     return result

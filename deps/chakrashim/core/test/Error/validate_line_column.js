@@ -60,3 +60,23 @@ foo(function() {
     `${a.b}`;         // Error thrown here.
 });
 
+foo(function() {
+    var k = 1;
+    while(unresolved[0]) {   // Error thrown here.
+        break;
+    }
+});
+
+foo(function() {
+    var k = 1;
+    while(typeof unresolved[0]) {   // Error thrown here.
+        break;
+    }
+});
+
+foo(function() {
+    var k = 1;
+    while(unresolved instanceof blah) {   // Error thrown here.
+        break;
+    }
+});

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <regress-exe>
   <test>
     <default>
@@ -45,7 +45,7 @@
       <baseline>parseISO.baseline</baseline>
       <!-- test is timezone-sensitive; remove exclude_jenkins after fix -->
       <!-- OSX doesn't provide expected DST for minus years -->
-      <tags>exclude_jenkins,exclude_mac</tags>
+      <tags>exclude_jenkins,exclude_mac,Slow</tags>
     </default>
   </test>
   <test>
@@ -87,13 +87,19 @@
   </test>
   <test>
     <default>
+      <files>formatting_xplat.js</files>
+      <tags>exclude_jenkins</tags>
+    </default>
+  </test>
+  <test>
+    <default>
       <files>formatting.js</files>
       <baseline>formatting.baseline</baseline>
       <compile-flags>-ForceOldDateAPI</compile-flags>
       <!-- test is timezone-sensitive; remove exclude_jenkins after fix -->
       <!-- on DST pass Win OldDateAPI jumps back to 01:00 after 01:59 -->
       <!-- todo: Do not force OLDDateAPI ? -->
-      <tags>exclude_jenkins,exclude_mac</tags>
+      <tags>exclude_jenkins,exclude_xplat</tags>
     </default>
     <condition order="1" type="include">
       <os>win8</os>
@@ -101,5 +107,20 @@
         <baseline>formatting.win8.baseline</baseline>
       </override>
     </condition>
+  </test>
+  <test>
+    <default>
+      <files>marshalbug.js</files>
+      <!-- only to catch debug build assertions -->
+      <compile-flags>-nonative -intl-</compile-flags>
+      <baseline/>
+      <tags>exclude_fre,exclude_dynapogo</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>xplatInterval.js</files>
+      <tags>exclude_jenkins,Slow</tags>
+    </default>
   </test>
 </regress-exe>

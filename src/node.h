@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #ifndef SRC_NODE_H_
 #define SRC_NODE_H_
 
@@ -78,6 +99,18 @@
 
 // Forward-declare libuv loop
 struct uv_loop_s;
+
+#if defined(NODE_ENGINE_CHAKRACORE)
+#define ENABLE_TTD_NODE 1
+#else
+#define ENABLE_TTD_NODE 0
+#endif
+
+#if ENABLE_TTD_NODE
+extern bool s_doTTRecord;
+extern bool s_doTTReplay;
+extern bool s_doTTDebug;
+#endif
 
 // Forward-declare these functions now to stop MSVS from becoming
 // terminally confused when it's done in node_internals.h
@@ -183,9 +216,12 @@ typedef intptr_t ssize_t;
 namespace node {
 
 NODE_EXTERN extern bool no_deprecation;
-#if HAVE_OPENSSL && NODE_FIPS_MODE
+#if HAVE_OPENSSL
+NODE_EXTERN extern bool ssl_openssl_cert_store;
+# if NODE_FIPS_MODE
 NODE_EXTERN extern bool enable_fips_crypto;
 NODE_EXTERN extern bool force_fips_crypto;
+# endif
 #endif
 
 NODE_EXTERN int Start(int argc, char *argv[]);

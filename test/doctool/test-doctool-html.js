@@ -47,14 +47,25 @@ const testData = [
       '<p>Describe <code>Foobar</code> in more detail here.</p>' +
       '<h2>Foobar II<span><a class="mark" href="#foo_foobar_ii" ' +
       'id="foo_foobar_ii">#</a></span></h2>' +
-      '<div class="api_metadata"><span>Added in: v5.3.0, v4.2.0</span></div> ' +
-      '<p>Describe <code>Foobar II</code> in more detail here.</p>' +
+      '<div class="api_metadata">' +
+      '<details class="changelog"><summary>History</summary>' +
+      '<table><tr><th>Version</th><th>Changes</th></tr>' +
+      '<tr><td>v5.3.0, v4.2.0</td>' +
+      '<td><p><span>Added in: v5.3.0, v4.2.0</span></p>' +
+      '</td></tr>' +
+      '<tr><td>v4.2.0</td><td><p>The <code>error</code> parameter can now be' +
+      'an arrow function.</p></td></tr></table></details>' +
+      '</div> ' +
+      '<p>Describe <code>Foobar II</code> in more detail here.' +
+      '<a href="http://man7.org/linux/man-pages/man1/fg.1.html">fg(1)</a></p>' +
       '<h2>Deprecated thingy<span><a class="mark" ' +
       'href="#foo_deprecated_thingy" id="foo_deprecated_thingy">#</a>' +
       '</span></h2>' +
       '<div class="api_metadata"><span>Added in: v1.0.0</span>' +
       '<span>Deprecated since: v2.0.0</span></div><p>Describe ' +
-      '<code>Deprecated thingy</code> in more detail here.</p>' +
+      '<code>Deprecated thingy</code> in more detail here.' +
+      '<a href="http://man7.org/linux/man-pages/man1/fg.1p.html">fg(1p)</a>' +
+      '</p>' +
       '<h2>Something<span><a class="mark" href="#foo_something" ' +
       'id="foo_something">#</a></span></h2> ' +
       '<!-- This is not a metadata comment --> ' +
@@ -72,11 +83,18 @@ const testData = [
     '<p>I exist and am being linked to.</p>' +
     '<!-- [end-include:doc_inc_2.md] -->'
   },
+  {
+    file: path.join(common.fixturesDir, 'sample_document.md'),
+    html: '<ol><li>fish</li><li><p>fish</p></li><li><p>Redfish</p></li>' +
+      '<li>Bluefish</li></ol>',
+    analyticsId: 'UA-67020396-1'
+  },
 ];
 
-testData.forEach(function(item) {
+testData.forEach((item) => {
   // Normalize expected data by stripping whitespace
   const expected = item.html.replace(/\s/g, '');
+  const includeAnalytics = typeof item.analyticsId !== 'undefined';
 
   fs.readFile(item.file, 'utf8', common.mustCall((err, input) => {
     assert.ifError(err);
@@ -89,6 +107,7 @@ testData.forEach(function(item) {
           filename: 'foo',
           template: 'doc/template.html',
           nodeVersion: process.version,
+          analytics: item.analyticsId,
         },
         common.mustCall((err, output) => {
           assert.ifError(err);
@@ -96,7 +115,17 @@ testData.forEach(function(item) {
           const actual = output.replace(/\s/g, '');
           // Assert that the input stripped of all whitespace contains the
           // expected list
-          assert.notEqual(actual.indexOf(expected), -1);
+          assert.notStrictEqual(actual.indexOf(expected), -1);
+
+          // Testing the insertion of Google Analytics script when
+          // an analytics id is provided. Should not be present by default
+          if (includeAnalytics) {
+            assert.notStrictEqual(actual.indexOf('google-analytics.com'), -1,
+                                  'Google Analytics script was not present');
+          } else {
+            assert.strictEqual(actual.indexOf('google-analytics.com'), -1,
+                               'Google Analytics script was present');
+          }
         }));
     }));
   }));

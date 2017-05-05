@@ -57,7 +57,7 @@ GenerateFunction(NativeCodeGenerator * nativeCodeGen, Js::FunctionBody * fn, Js:
 {
     nativeCodeGen->GenerateFunction(fn, function);
 }
-CodeGenAllocators* GetForegroundAllocator(NativeCodeGenerator * nativeCodeGen, PageAllocator* pageallocator)
+InProcCodeGenAllocators* GetForegroundAllocator(NativeCodeGenerator * nativeCodeGen, PageAllocator* pageallocator)
 {
     return nativeCodeGen->GetCodeGenAllocator(pageallocator);
 }
@@ -197,5 +197,8 @@ SetProfilerFromNativeCodeGen(NativeCodeGenerator * toNativeCodeGen, NativeCodeGe
 
 void DeleteNativeCodeData(NativeCodeData * data)
 {
-    delete data;
+    if (data)
+    {
+        HeapDelete(data);
+    }
 }

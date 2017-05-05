@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #include "tcp_wrap.h"
 
 #include "connection_wrap.h"
@@ -235,34 +256,6 @@ void TCPWrap::Listen(const FunctionCallbackInfo<Value>& args) {
 }
 
 
-void TCPWrap::AfterConnect(uv_connect_t* req, int status) {
-  ConnectWrap* req_wrap = static_cast<ConnectWrap*>(req->data);
-  TCPWrap* wrap = static_cast<TCPWrap*>(req->handle->data);
-  CHECK_EQ(req_wrap->env(), wrap->env());
-  Environment* env = wrap->env();
-
-  HandleScope handle_scope(env->isolate());
-  Context::Scope context_scope(env->context());
-
-  // The wrap and request objects should still be there.
-  CHECK_EQ(req_wrap->persistent().IsEmpty(), false);
-  CHECK_EQ(wrap->persistent().IsEmpty(), false);
-
-  Local<Object> req_wrap_obj = req_wrap->object();
-  Local<Value> argv[5] = {
-    Integer::New(env->isolate(), status),
-    wrap->object(),
-    req_wrap_obj,
-    v8::True(env->isolate()),
-    v8::True(env->isolate())
-  };
-
-  req_wrap->MakeCallback(env->oncomplete_string(), arraysize(argv), argv);
-
-  delete req_wrap;
-}
-
-
 void TCPWrap::Connect(const FunctionCallbackInfo<Value>& args) {
   Environment* env = Environment::GetCurrent(args);
 
@@ -285,7 +278,7 @@ void TCPWrap::Connect(const FunctionCallbackInfo<Value>& args) {
   if (err == 0) {
     ConnectWrap* req_wrap =
         new ConnectWrap(env, req_wrap_obj, AsyncWrap::PROVIDER_TCPCONNECTWRAP);
-    err = uv_tcp_connect(&req_wrap->req_,
+    err = uv_tcp_connect(req_wrap->req(),
                          &wrap->handle_,
                          reinterpret_cast<const sockaddr*>(&addr),
                          AfterConnect);
@@ -320,7 +313,7 @@ void TCPWrap::Connect6(const FunctionCallbackInfo<Value>& args) {
   if (err == 0) {
     ConnectWrap* req_wrap =
         new ConnectWrap(env, req_wrap_obj, AsyncWrap::PROVIDER_TCPCONNECTWRAP);
-    err = uv_tcp_connect(&req_wrap->req_,
+    err = uv_tcp_connect(req_wrap->req(),
                          &wrap->handle_,
                          reinterpret_cast<const sockaddr*>(&addr),
                          AfterConnect);

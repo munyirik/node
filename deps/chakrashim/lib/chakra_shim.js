@@ -37,7 +37,8 @@
     Set_entries = Set.prototype.entries,
     Set_values = Set.prototype.values,
     Symbol_keyFor = Symbol.keyFor,
-    Symbol_for = Symbol.for;
+    Symbol_for = Symbol.for,
+    Global_ParseInt = parseInt;
   var BuiltInError = Error;
   var global = this;
 
@@ -210,7 +211,8 @@
 
   function captureStackTrace(err, func) {
     // skip 3 frames: lambda, withStackTraceLimitOffset, this frame
-    return privateCaptureStackTrace(err, func,
+    return privateCaptureStackTrace(
+      err, func,
       withStackTraceLimitOffset(3, () => new BuiltInError()),
       3);
   }
@@ -232,7 +234,7 @@
     function ensureStackTrace() {
       if (!currentStackTrace) {
         currentStackTrace = parseStack(
-          Reflect_apply(oldStackDesc.get, e) || '', // Call saved old getter
+          Reflect_apply(oldStackDesc.get, e, []) || '', // Call saved old getter
           skipDepth, startFuncName);
       }
       return currentStackTrace;
@@ -276,7 +278,7 @@
       Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError,
       URIError
     ].forEach(function(type) {
-      var newType = function __newType() {
+      var newType = function newType() {
         var e = withStackTraceLimitOffset(
           3, () => Reflect_construct(type, arguments, new.target || newType));
         // skip 3 frames: lambda, withStackTraceLimitOffset, this frame
@@ -307,7 +309,7 @@
 
     Function.prototype.toString = function toString() {
       return Reflect_apply(Function_prototype_toString,
-        typeToNative.get(this) || this, arguments);
+                           typeToNative.get(this) || this, arguments);
     };
     typeToNative.set(Function.prototype.toString, Function_prototype_toString);
   }
@@ -428,7 +430,7 @@
   var microTasks = [];
 
   function patchUtils(utils) {
-    var isUintRegex = /^(0|[1-9]\\d*)$/;
+    var isUintRegex = /^(0|[1-9]\d*)$/;
 
     var isUint = function(value) {
       var result = isUintRegex.test(value);
@@ -449,7 +451,11 @@
     utils.getPropertyNames = function(a) {
       var names = [];
       for (var propertyName in a) {
-        names.push(propertyName);
+        if (isUint(propertyName)) {
+          names.push(Global_ParseInt(propertyName));
+        } else {
+          names.push(propertyName);
+        }
       }
       return names;
     };
@@ -551,6 +557,24 @@
     utils.isNumberObject = function(obj) {
       return compareType(obj, 'Number');
     };
+    utils.isArgumentsObject = function(obj) {
+      return compareType(obj, 'Arguments');
+    };
+    utils.isGeneratorObject = function(obj) {
+      return compareType(obj, 'Generator');
+    };
+    utils.isWeakMap = function(obj) {
+      return compareType(obj, 'WeakMap');
+    };
+    utils.isWeakSet = function(obj) {
+      return compareType(obj, 'WeakSet');
+    };
+    utils.isSymbolObject = function(obj) {
+      return compareType(obj, 'Symbol');
+    };
+    utils.isName = function(obj) {
+      return compareType(obj, 'String') || compareType(obj, 'Symbol');
+    };
     utils.getSymbolKeyFor = function(symbol) {
       return Symbol_keyFor(symbol);
     };
@@ -576,7 +600,10 @@
 
       var attributes = 0;
       // taken from v8.h. Update if this changes in future
-      const ReadOnly = 1, DontEnum = 2, DontDelete = 4;
+      const ReadOnly = 1,
+        DontEnum = 2,
+        DontDelete = 4;
+
       if (!descriptor.writable) {
         attributes |= ReadOnly;
       }
@@ -587,6 +614,22 @@
         attributes |= DontDelete;
       }
       return attributes;
+    };
+    utils.getOwnPropertyNames = function(obj) {
+      var ownPropertyNames = Object_getOwnPropertyNames(obj);
+      var i = 0;
+      while (i < ownPropertyNames.length) {
+        var item = ownPropertyNames[i];
+        if (isUint(item)) {
+          ownPropertyNames[i] = Global_ParseInt(item);
+          i++;
+          continue;
+        }
+        // As per spec, getOwnPropertyNames() first include
+        // numeric properties followed by non-numeric
+        break;
+      }
+      return ownPropertyNames;
     };
   }
 

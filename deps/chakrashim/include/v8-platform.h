@@ -28,6 +28,10 @@
 #ifndef V8_V8_PLATFORM_H_
 #define V8_V8_PLATFORM_H_
 
+#include <stdint.h>
+#include <string>
+#include <memory>
+
 namespace v8 {
 
 class Isolate;
@@ -36,6 +40,22 @@ class Task {
  public:
   virtual ~Task() {}
   virtual void Run() = 0;
+};
+
+/**
+* The interface represents complex arguments to trace events.
+*/
+class ConvertableToTraceFormat {
+public:
+    virtual ~ConvertableToTraceFormat() = default;
+
+    /**
+    * Append the class info to the provided |out| string. The appended
+    * data must be a valid JSON object. Strings must be properly quoted, and
+    * escaped. There is no processing applied to the content after it is
+    * appended.
+    */
+    virtual void AppendAsTraceFormat(std::string* out) const = 0;
 };
 
 class Platform {
@@ -50,6 +70,70 @@ class Platform {
                                       ExpectedRuntime expected_runtime) = 0;
   virtual void CallOnForegroundThread(Isolate* isolate, Task* task) = 0;
   virtual double MonotonicallyIncreasingTime() = 0;
+
+  /**
+  * Called by TRACE_EVENT* macros, don't call this directly.
+  * The name parameter is a category group for example:
+  * TRACE_EVENT0("v8,parse", "V8.Parse")
+  * The pointer returned points to a value with zero or more of the bits
+  * defined in CategoryGroupEnabledFlags.
+  **/
+  virtual const uint8_t* GetCategoryGroupEnabled(const char* name) {
+    static uint8_t no = 0;
+    return &no;
+  }
+
+  /**
+  * Gets the category group name of the given category_enabled_flag pointer.
+  * Usually used while serliazing TRACE_EVENTs.
+  **/
+  virtual const char* GetCategoryGroupName(
+      const uint8_t* category_enabled_flag) {
+    static const char dummy[] = "dummy";
+    return dummy;
+  }
+
+  /**
+  * Adds a trace event to the platform tracing system. This function call is
+  * usually the result of a TRACE_* macro from trace_event_common.h when
+  * tracing and the category of the particular trace are enabled. It is not
+  * advisable to call this function on its own; it is really only meant to be
+  * used by the trace macros. The returned handle can be used by
+  * UpdateTraceEventDuration to update the duration of COMPLETE events.
+  */
+  virtual uint64_t AddTraceEvent(
+      char phase, const uint8_t* category_enabled_flag, const char* name,
+      const char* scope, uint64_t id, uint64_t bind_id, int32_t num_args,
+      const char** arg_names, const uint8_t* arg_types,
+      const uint64_t* arg_values, unsigned int flags) {
+    return 0;
+  }
+
+  /**
+  * Adds a trace event to the platform tracing system. This function call is
+  * usually the result of a TRACE_* macro from trace_event_common.h when
+  * tracing and the category of the particular trace are enabled. It is not
+  * advisable to call this function on its own; it is really only meant to be
+  * used by the trace macros. The returned handle can be used by
+  * UpdateTraceEventDuration to update the duration of COMPLETE events.
+  */
+  virtual uint64_t AddTraceEvent(
+      char phase, const uint8_t* category_enabled_flag, const char* name,
+      const char* scope, uint64_t id, uint64_t bind_id, int32_t num_args,
+      const char** arg_names, const uint8_t* arg_types,
+      const uint64_t* arg_values,
+      std::unique_ptr<ConvertableToTraceFormat>* arg_convertables,
+      unsigned int flags) {
+      return AddTraceEvent(phase, category_enabled_flag, name, scope, id, bind_id,
+          num_args, arg_names, arg_types, arg_values, flags);
+  }
+
+  /**
+  * Sets the duration field of a COMPLETE trace event. It must be called with
+  * the handle returned from AddTraceEvent().
+  **/
+  virtual void UpdateTraceEventDuration(const uint8_t* category_enabled_flag,
+      const char* name, uint64_t handle) {}
 };
 
 }  // namespace v8

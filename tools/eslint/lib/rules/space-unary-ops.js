@@ -69,6 +69,21 @@ module.exports = {
         }
 
         /**
+         * Check if it is safe to remove the spaces between the two tokens in
+         * the context of a non-word prefix unary operator. For example, `+ +1`
+         * cannot safely be changed to `++1`.
+         * @param {Token} firstToken The operator for a non-word prefix unary operator
+         * @param {Token} secondToken The first token of its operand
+         * @returns {boolean} Whether or not the spacing between the tokens can be removed
+         */
+        function canRemoveSpacesBetween(firstToken, secondToken) {
+            return !(
+                (firstToken.value === "+" && secondToken.value[0] === "+") ||
+                (firstToken.value === "-" && secondToken.value[0] === "-")
+            );
+        }
+
+        /**
         * Checks if an override exists for a given operator.
         * @param {ASTnode} node AST node
         * @param {string} operator Operator
@@ -100,7 +115,10 @@ module.exports = {
             if (secondToken.range[0] === firstToken.range[1]) {
                 context.report({
                     node,
-                    message: "Unary word operator '" + word + "' must be followed by whitespace.",
+                    message: "Unary word operator '{{word}}' must be followed by whitespace.",
+                    data: {
+                        word
+                    },
                     fix(fixer) {
                         return fixer.insertTextAfter(firstToken, " ");
                     }
@@ -121,7 +139,10 @@ module.exports = {
                 if (secondToken.range[0] > firstToken.range[1]) {
                     context.report({
                         node,
-                        message: "Unexpected space after unary word operator '" + word + "'.",
+                        message: "Unexpected space after unary word operator '{{word}}'.",
+                        data: {
+                            word
+                        },
                         fix(fixer) {
                             return fixer.removeRange([firstToken.range[1], secondToken.range[0]]);
                         }
@@ -171,6 +192,17 @@ module.exports = {
         }
 
         /**
+        * Verifies AwaitExpressions satisfy spacing requirements
+        * @param {ASTNode} node AwaitExpression AST node
+        * @returns {void}
+        */
+        function checkForSpacesAfterAwait(node) {
+            const tokens = sourceCode.getFirstTokens(node, 3);
+
+            checkUnaryWordOperatorForSpaces(node, tokens[0], tokens[1], "await");
+        }
+
+        /**
         * Verifies UnaryExpression, UpdateExpression and NewExpression have spaces before or after the operator
         * @param {ASTnode} node AST node
         * @param {Object} firstToken First token in the expression
@@ -185,7 +217,10 @@ module.exports = {
                 if (firstToken.range[1] === secondToken.range[0]) {
                     context.report({
                         node,
-                        message: "Unary operator '" + firstToken.value + "' must be followed by whitespace.",
+                        message: "Unary operator '{{operator}}' must be followed by whitespace.",
+                        data: {
+                            operator: firstToken.value
+                        },
                         fix(fixer) {
                             return fixer.insertTextAfter(firstToken, " ");
                         }
@@ -195,7 +230,10 @@ module.exports = {
                 if (firstToken.range[1] === secondToken.range[0]) {
                     context.report({
                         node,
-                        message: "Space is required before unary expressions '" + secondToken.value + "'.",
+                        message: "Space is required before unary expressions '{{token}}'.",
+                        data: {
+                            token: secondToken.value
+                        },
                         fix(fixer) {
                             return fixer.insertTextBefore(secondToken, " ");
                         }
@@ -216,9 +254,15 @@ module.exports = {
                 if (secondToken.range[0] > firstToken.range[1]) {
                     context.report({
                         node,
-                        message: "Unexpected space after unary operator '" + firstToken.value + "'.",
+                        message: "Unexpected space after unary operator '{{operator}}'.",
+                        data: {
+                            operator: firstToken.value
+                        },
                         fix(fixer) {
-                            return fixer.removeRange([firstToken.range[1], secondToken.range[0]]);
+                            if (canRemoveSpacesBetween(firstToken, secondToken)) {
+                                return fixer.removeRange([firstToken.range[1], secondToken.range[0]]);
+                            }
+                            return null;
                         }
                     });
                 }
@@ -226,7 +270,10 @@ module.exports = {
                 if (secondToken.range[0] > firstToken.range[1]) {
                     context.report({
                         node,
-                        message: "Unexpected space before unary operator '" + secondToken.value + "'.",
+                        message: "Unexpected space before unary operator '{{operator}}'.",
+                        data: {
+                            operator: secondToken.value
+                        },
                         fix(fixer) {
                             return fixer.removeRange([firstToken.range[1], secondToken.range[0]]);
                         }
@@ -273,7 +320,8 @@ module.exports = {
             UnaryExpression: checkForSpaces,
             UpdateExpression: checkForSpaces,
             NewExpression: checkForSpaces,
-            YieldExpression: checkForSpacesAfterYield
+            YieldExpression: checkForSpacesAfterYield,
+            AwaitExpression: checkForSpacesAfterAwait
         };
 
     }

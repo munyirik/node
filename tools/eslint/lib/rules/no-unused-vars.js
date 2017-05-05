@@ -42,6 +42,9 @@ module.exports = {
                             args: {
                                 enum: ["all", "after-used", "none"]
                             },
+                            ignoreRestSiblings: {
+                                type: "boolean"
+                            },
                             argsIgnorePattern: {
                                 type: "string"
                             },
@@ -59,12 +62,16 @@ module.exports = {
     },
 
     create(context) {
+        const sourceCode = context.getSourceCode();
 
-        const MESSAGE = "'{{name}}' is defined but never used.";
+        const DEFINED_MESSAGE = "'{{name}}' is defined but never used.";
+        const ASSIGNED_MESSAGE = "'{{name}}' is assigned a value but never used.";
+        const REST_PROPERTY_TYPE = /^(?:Experimental)?RestProperty$/;
 
         const config = {
             vars: "all",
             args: "after-used",
+            ignoreRestSiblings: false,
             caughtErrors: "none"
         };
 
@@ -76,6 +83,7 @@ module.exports = {
             } else {
                 config.vars = firstOption.vars || config.vars;
                 config.args = firstOption.args || config.args;
+                config.ignoreRestSiblings = firstOption.ignoreRestSiblings || config.ignoreRestSiblings;
                 config.caughtErrors = firstOption.caughtErrors || config.caughtErrors;
 
                 if (firstOption.varsIgnorePattern) {
@@ -119,9 +127,32 @@ module.exports = {
                 }
 
                 return node.parent.type.indexOf("Export") === 0;
-            } else {
-                return false;
             }
+            return false;
+
+        }
+
+        /**
+         * Determines if a variable has a sibling rest property
+         * @param {Variable} variable - EScope variable object.
+         * @returns {boolean} True if the variable is exported, false if not.
+         * @private
+         */
+        function hasRestSpreadSibling(variable) {
+            if (config.ignoreRestSiblings) {
+                return variable.defs.some(def => {
+                    const propertyNode = def.name.parent;
+                    const patternNode = propertyNode.parent;
+
+                    return (
+                        propertyNode.type === "Property" &&
+                        patternNode.type === "ObjectPattern" &&
+                        REST_PROPERTY_TYPE.test(patternNode.properties[patternNode.properties.length - 1].type)
+                    );
+                });
+            }
+
+            return false;
         }
 
         /**
@@ -150,28 +181,6 @@ module.exports = {
                 }
 
                 scope = scope.upper;
-            }
-
-            return false;
-        }
-
-        /**
-         * Checks whether a given node is inside of a loop or not.
-         *
-         * @param {ASTNode} node - A node to check.
-         * @returns {boolean} `true` if the node is inside of a loop.
-         * @private
-         */
-        function isInsideOfLoop(node) {
-            while (node) {
-                if (astUtils.isLoop(node)) {
-                    return true;
-                }
-                if (astUtils.isFunction(node)) {
-                    return false;
-                }
-
-                node = node.parent;
             }
 
             return false;
@@ -214,7 +223,7 @@ module.exports = {
             const granpa = parent.parent;
             const refScope = ref.from.variableScope;
             const varScope = ref.resolved.scope.variableScope;
-            const canBeUsedLater = refScope !== varScope || isInsideOfLoop(id);
+            const canBeUsedLater = refScope !== varScope || astUtils.isInLoop(id);
 
             /*
              * Inherits the previous node if this reference is in the node.
@@ -389,15 +398,11 @@ module.exports = {
          * @private
          */
         function isUsedVariable(variable) {
-            const functionNodes = variable.defs.filter(function(def) {
-                    return def.type === "FunctionName";
-                }).map(function(def) {
-                    return def.node;
-                }),
+            const functionNodes = variable.defs.filter(def => def.type === "FunctionName").map(def => def.node),
                 isFunctionDefinition = functionNodes.length > 0;
             let rhsNode = null;
 
-            return variable.references.some(function(ref) {
+            return variable.references.some(ref => {
                 if (isForInRef(ref)) {
                     return true;
                 }
@@ -412,6 +417,33 @@ module.exports = {
                     !(isFunctionDefinition && isSelfReference(ref, functionNodes))
                 );
             });
+        }
+
+        /**
+         * Checks whether the given variable is the last parameter in the non-ignored parameters.
+         *
+         * @param {escope.Variable} variable - The variable to check.
+         * @returns {boolean} `true` if the variable is the last.
+         */
+        function isLastInNonIgnoredParameters(variable) {
+            const def = variable.defs[0];
+
+            // This is the last.
+            if (def.index === def.node.params.length - 1) {
+                return true;
+            }
+
+            // if all parameters preceded by this variable are ignored and unused, this is the last.
+            if (config.argsIgnorePattern) {
+                const params = context.getDeclaredVariables(def.node);
+                const posteriorParams = params.slice(params.indexOf(variable) + 1);
+
+                if (posteriorParams.every(v => v.references.length === 0 && config.argsIgnorePattern.test(v.name))) {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         /**
@@ -466,7 +498,7 @@ module.exports = {
                         if (type === "Parameter") {
 
                             // skip any setter argument
-                            if (def.node.parent.type === "Property" && def.node.parent.kind === "set") {
+                            if ((def.node.parent.type === "Property" || def.node.parent.type === "MethodDefinition") && def.node.parent.kind === "set") {
                                 continue;
                             }
 
@@ -481,7 +513,7 @@ module.exports = {
                             }
 
                             // if "args" option is "after-used", skip all but the last parameter
-                            if (config.args === "after-used" && def.index < def.node.params.length - 1) {
+                            if (config.args === "after-used" && !isLastInNonIgnoredParameters(variable)) {
                                 continue;
                             }
                         } else {
@@ -493,7 +525,7 @@ module.exports = {
                         }
                     }
 
-                    if (!isUsedVariable(variable) && !isExported(variable)) {
+                    if (!isUsedVariable(variable) && !isExported(variable) && !hasRestSpreadSibling(variable)) {
                         unusedVars.push(variable);
                     }
                 }
@@ -514,7 +546,7 @@ module.exports = {
          * @private
          */
         function getColumnInComment(variable, comment) {
-            const namePattern = new RegExp("[\\s,]" + lodash.escapeRegExp(variable.name) + "(?:$|[\\s,:])", "g");
+            const namePattern = new RegExp(`[\\s,]${lodash.escapeRegExp(variable.name)}(?:$|[\\s,:])`, "g");
 
             // To ignore the first text "global".
             namePattern.lastIndex = comment.value.indexOf("global") + 6;
@@ -535,23 +567,8 @@ module.exports = {
          */
         function getLocation(variable) {
             const comment = variable.eslintExplicitGlobalComment;
-            const baseLoc = comment.loc.start;
-            let column = getColumnInComment(variable, comment);
-            const prefix = comment.value.slice(0, column);
-            const lineInComment = (prefix.match(/\n/g) || []).length;
 
-            if (lineInComment > 0) {
-                column -= 1 + prefix.lastIndexOf("\n");
-            } else {
-
-                // 2 is for `/*`
-                column += baseLoc.column + 2;
-            }
-
-            return {
-                line: baseLoc.line + lineInComment,
-                column
-            };
+            return sourceCode.getLocFromIndex(comment.range[0] + 2 + getColumnInComment(variable, comment));
         }
 
         //--------------------------------------------------------------------------
@@ -569,13 +586,13 @@ module.exports = {
                         context.report({
                             node: programNode,
                             loc: getLocation(unusedVar),
-                            message: MESSAGE,
+                            message: DEFINED_MESSAGE,
                             data: unusedVar
                         });
                     } else if (unusedVar.defs.length > 0) {
                         context.report({
                             node: unusedVar.identifiers[0],
-                            message: MESSAGE,
+                            message: unusedVar.references.some(ref => ref.isWrite()) ? ASSIGNED_MESSAGE : DEFINED_MESSAGE,
                             data: unusedVar
                         });
                     }

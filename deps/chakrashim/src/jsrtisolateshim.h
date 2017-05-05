@@ -19,8 +19,18 @@
 // IN THE SOFTWARE.
 
 #include "uv.h"
-#include <unordered_map>
 #include <vector>
+
+// CHAKRA-TODO : now that node is using libc++ for C++11 support can we remove
+// all OSX_SDK_TR1 specialization?
+#if !defined(OSX_SDK_TR1) && defined(__APPLE__)
+#include <AvailabilityMacros.h>
+#if __ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ < MAC_OS_X_VERSION_10_9
+#define OSX_SDK_TR1
+#endif
+#endif
+
+#include <unordered_map>
 
 namespace v8 {
 
@@ -31,7 +41,7 @@ extern bool g_disableIdleGc;
 
 namespace jsrt {
 
-enum CachedPropertyIdRef {
+enum CachedPropertyIdRef : int {
 #define DEF(x, ...) x,
 #include "jsrtcachedpropertyidref.inc"
   Count
@@ -45,14 +55,17 @@ enum CachedSymbolPropertyIdRef {
 
 class IsolateShim {
  public:
-
-  bool IsolateShim::NewContext(JsContextRef * context, bool exposeGC,
+  v8::ArrayBuffer::Allocator* arrayBufferAllocator;
+  bool NewContext(JsContextRef * context, bool exposeGC, bool useGlobalTTState,
                                JsValueRef globalObjectTemplateInstance);
   bool GetMemoryUsage(size_t * memoryUsage);
   bool Dispose();
   bool IsDisposing();
 
-  static v8::Isolate * New();
+  static v8::Isolate * New(size_t optReplayUriLength, const char* optReplayUri,
+                           bool doRecord, bool doReplay, bool doDebug,
+                           uint32_t snapInterval, uint32_t snapHistoryLength);
+
   static v8::Isolate * GetCurrentAsIsolate();
   static IsolateShim * GetCurrent();
   static IsolateShim * FromIsolate(v8::Isolate * isolate);
@@ -69,6 +82,11 @@ class IsolateShim {
   void PushScope(ContextShim::Scope * scope, ContextShim * contextShim);
   void PopScope(ContextShim::Scope * scope);
 
+  // TTD_NODE
+  static bool RunSingleStepOfReverseMoveLoop(v8::Isolate* isolate,
+                                             uint64_t* moveMode,
+                                             int64_t* nextEventTime);
+
   ContextShim * GetCurrentContextShim();
 
   // Symbols propertyIdRef
@@ -82,6 +100,7 @@ class IsolateShim {
   JsPropertyIdRef GetCachedPropertyIdRef(
     CachedPropertyIdRef cachedPropertyIdRef);
 
+  void RequestInterrupt(v8::InterruptCallback callback, void* data);
   void DisableExecution();
   bool IsExeuctionDisabled();
   void EnableExecution();
@@ -98,8 +117,14 @@ class IsolateShim {
     }
   }
 
+  JsValueRef GetChakraShimJsArrayBuffer();
+  JsValueRef GetChakraDebugShimJsArrayBuffer();
+  JsValueRef GetChakraInspectorShimJsArrayBuffer();
+
   void SetData(unsigned int slot, void* data);
   void* GetData(unsigned int slot);
+
+  ContextShim* debugContext;
 
   inline uv_prepare_t* idleGc_prepare_handle() {
     return &idleGc_prepare_handle_;
@@ -137,8 +162,8 @@ class IsolateShim {
   explicit IsolateShim(JsRuntimeHandle runtime);
   ~IsolateShim();
   static v8::Isolate * ToIsolate(IsolateShim * isolate);
-  static void CALLBACK JsContextBeforeCollectCallback(JsRef contextRef,
-                                                      void *data);
+  static void CHAKRA_CALLBACK JsContextBeforeCollectCallback(JsRef contextRef,
+                                                             void *data);
 
   JsRuntimeHandle runtime;
   JsPropertyIdRef symbolPropertyIdRefs[CachedSymbolPropertyIdRef::SymbolCount];
@@ -160,7 +185,8 @@ class IsolateShim {
   // CHAKRA-TODO: support multiple shims
   static IsolateShim * s_isolateList;
 
-  static __declspec(thread) IsolateShim * s_currentIsolate;
+  static THREAD_LOCAL IsolateShim * s_currentIsolate;
+  static THREAD_LOCAL IsolateShim * s_previousIsolate;
 
   uv_prepare_t idleGc_prepare_handle_;
   uv_timer_t idleGc_timer_handle_;

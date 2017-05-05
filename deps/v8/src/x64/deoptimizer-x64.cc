@@ -66,7 +66,7 @@ void Deoptimizer::PatchCodeForDeoptimization(Isolate* isolate, Code* code) {
 #endif
   DeoptimizationInputData* deopt_data =
       DeoptimizationInputData::cast(code->deoptimization_data());
-  deopt_data->SetSharedFunctionInfo(Smi::FromInt(0));
+  deopt_data->SetSharedFunctionInfo(Smi::kZero);
   // For each LLazyBailout instruction insert a call to the corresponding
   // deoptimization entry.
   for (int i = 0; i < deopt_data->DeoptCount(); i++) {
@@ -116,8 +116,7 @@ void Deoptimizer::TableEntryGenerator::Generate() {
   const int kDoubleRegsSize = kDoubleSize * XMMRegister::kMaxNumRegisters;
   __ subp(rsp, Immediate(kDoubleRegsSize));
 
-  const RegisterConfiguration* config =
-      RegisterConfiguration::ArchDefault(RegisterConfiguration::CRANKSHAFT);
+  const RegisterConfiguration* config = RegisterConfiguration::Crankshaft();
   for (int i = 0; i < config->num_allocatable_double_registers(); ++i) {
     int code = config->GetAllocatableDoubleCode(i);
     XMMRegister xmm_reg = XMMRegister::from_code(code);

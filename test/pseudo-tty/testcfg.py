@@ -128,7 +128,7 @@ class TTYTestConfiguration(test.TestConfiguration):
     else:
         return []
 
-  def ListTests(self, current_path, path, arch, mode):
+  def ListTests(self, current_path, path, arch, mode, jsEngine):
     all_tests = [current_path + [t] for t in self.Ls(self.root)]
     result = []
     # Skip these tests on Windows, as pseudo terminals are not available
@@ -142,8 +142,7 @@ class TTYTestConfiguration(test.TestConfiguration):
         file_path = file_prefix + ".js"
         output_path = file_prefix + ".out"
         if not exists(output_path):
-          print "Could not find %s" % output_path
-          continue
+          raise Exception("Could not find %s" % output_path)
         result.append(TTYTestCase(test, file_path, output_path,
                                       arch, mode, self.context, self))
     return result
@@ -152,7 +151,7 @@ class TTYTestConfiguration(test.TestConfiguration):
     return ['sample', 'sample=shell']
 
   def GetTestStatus(self, sections, defs):
-    status_file = join(self.root, 'message.status')
+    status_file = join(self.root, 'pseudo-tty.status')
     if exists(status_file):
       test.ReadConfigurationInto(status_file, sections, defs)
 

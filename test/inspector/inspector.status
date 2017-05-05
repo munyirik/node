@@ -1,0 +1,15 @@
+prefix inspector
+
+# To mark a test as flaky, list the test name in the appropriate section
+# below, without ".js", followed by ": PASS,FLAKY". Example:
+# sample-test                        : PASS,FLAKY
+
+[true] # This section applies to all platforms
+
+[$system==win32]
+
+[$jsEngine==chakracore]
+test-inspector : SKIP
+test-inspector-stops-no-file : SKIP
+test-not-blocked-on-idle : SKIP
+test-inspector-ip-detection : SKIP

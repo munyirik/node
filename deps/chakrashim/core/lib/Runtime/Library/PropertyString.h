@@ -8,7 +8,7 @@ namespace Js
 {
     struct PropertyCache
     {
-        Type * type;
+        Field(Type*) type;
         union
         {
             struct
@@ -37,8 +37,8 @@ namespace Js
     class PropertyString : public JavascriptString
     {
     protected:
-        PropertyCache* propCache;
-        const Js::PropertyRecord* m_propertyRecord;
+        Field(PropertyCache*) propCache;
+        Field(const Js::PropertyRecord*) m_propertyRecord;
         DEFINE_VTABLE_CTOR(PropertyString, JavascriptString);
         DECLARE_CONCRETE_STRING_CLASS;
 
@@ -62,6 +62,12 @@ namespace Js
         //Get the associated property id for this string if there is on (e.g. it is a propertystring otherwise return Js::PropertyIds::_none)
         virtual Js::PropertyId TryGetAssociatedPropertyId() const override { return this->m_propertyRecord->GetPropertyId(); }
 #endif
+
+    public:
+        virtual VTableValue DummyVirtualFunctionToHinderLinkerICF()
+        {
+            return VTableValue::VtablePropertyString;
+        }
     };
 
     class ArenaAllocPropertyString sealed : public PropertyString

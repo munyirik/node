@@ -7,7 +7,8 @@ class ThreadContextManagerBase
 {
 protected:
 
-    static void ShutdownThreadContext(ThreadContext* threadContext);
+    static void ShutdownThreadContext(
+        ThreadContext* threadContext, bool deleteThreadContext = true);
 };
 
 class ThreadBoundThreadContextManager : public ThreadContextManagerBase
@@ -15,17 +16,13 @@ class ThreadBoundThreadContextManager : public ThreadContextManagerBase
     friend class ThreadContext;
 
 public:
-    typedef DListCounted<ThreadContextTLSEntry *, HeapAllocator> EntryList;
+    typedef DList<ThreadContextTLSEntry *, HeapAllocator> EntryList;
 
     static ThreadContext * EnsureContextForCurrentThread();
     static void DestroyContextAndEntryForCurrentThread();
     static void DestroyAllContexts();
     static void DestroyAllContextsAndEntries();
     static JsUtil::JobProcessor * GetSharedJobProcessor();
-    static uint GetActiveThreadContextCount();
-    static void ResetMaxNumberActiveThreadContexts();
-    static uint s_maxNumberActiveThreadContexts;
-
 private:
     static EntryList entries;
 #if ENABLE_BACKGROUND_JOB_PROCESSOR

@@ -8,6 +8,7 @@ prefix known_issues
 
 [$system==win32]
 test-stdout-buffer-flush-on-exit: SKIP
+test-cluster-disconnect-handles: SKIP
 
 [$system==linux]
 
@@ -18,3 +19,9 @@ test-stdout-buffer-flush-on-exit: SKIP
 [$system==freebsd]
 
 [$system==aix]
+
+[$jsEngine==chakracore]
+test-vm-function-redefinition : SKIP
+test-vm-inherited_properties : SKIP
+test-vm-data-property-writable : SKIP
+test-vm-attributes-property-not-on-sandbox : SKIP

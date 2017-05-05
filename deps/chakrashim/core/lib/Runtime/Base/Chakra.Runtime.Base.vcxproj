@@ -26,10 +26,15 @@
         $(MSBuildThisFileDirectory)..\..\Common;
         $(MSBuildThisFileDirectory)..\..\Parser;
         $(MSBuildThisFileDirectory)..\..\Runtime\ByteCode;
+        $(MSBuildThisFileDirectory)..\..\WasmReader;
+        $(ChakraJITIDLIntDir);
+        $(MSBuildThisFileDirectory)..\..\JITClient;
         %(AdditionalIncludeDirectories)
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>RuntimeBasePch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -66,8 +71,9 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)RuntimeBasePch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="jitprofiling.cpp" />
-    <ClCompile Include="VTuneChakraProfile.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)ThreadContextInfo.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)jitprofiling.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)VTuneChakraProfile.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="CompactCounters.h" />
@@ -80,7 +86,6 @@
     <ClInclude Include="CharStringCache.h" />
     <ClInclude Include="Constants.h" />
     <ClInclude Include="CrossSite.h" />
-    <ClInclude Include="CrossSiteEnumerator.h" />
     <ClInclude Include="CrossSiteObject.h" />
     <ClInclude Include="Debug.h" />
     <ClInclude Include="DelayLoadLibrary.h" />
@@ -98,6 +103,7 @@
     <ClInclude Include="RegexPatternMruMap.h" />
     <ClInclude Include="ScriptContext.h" />
     <ClInclude Include="ScriptContextBase.h" />
+    <ClInclude Include="ScriptContextInfo.h" />
     <ClInclude Include="ScriptContextOptimizationOverrideInfo.h" />
     <ClInclude Include="ScriptContextProfiler.h" />
     <ClInclude Include="ScriptMemoryDumper.h" />
@@ -108,6 +114,7 @@
     <ClInclude Include="ThreadBoundThreadContextManager.h" />
     <ClInclude Include="ThreadConfigFlagsList.h" />
     <ClInclude Include="ThreadContext.h" />
+    <ClInclude Include="ThreadContextInfo.h" />
     <ClInclude Include="ThreadContextTlsEntry.h" />
     <ClInclude Include="ThreadServiceWrapper.h" />
     <ClInclude Include="ThreadServiceWrapperBase.h" />
@@ -115,6 +122,11 @@
     <ClInclude Include="VTuneChakraProfile.h" />
     <ClInclude Include="WindowsFoundationAdapter.h" />
     <ClInclude Include="WindowsGlobalizationAdapter.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\JITIDL\Chakra.JITIDL.vcxproj">
+      <Project>{0db5ecbc-9385-4a65-be2c-4ef7c65cb719}</Project>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(BuildConfigPropsPath)Chakra.Build.targets" Condition="exists('$(BuildConfigPropsPath)Chakra.Build.targets')" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

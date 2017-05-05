@@ -19,7 +19,18 @@
 // IN THE SOFTWARE.
 
 #include "v8chakra.h"
+#include <limits.h>
 #include <math.h>
+
+#ifdef __APPLE__
+inline int isnan(double x) {
+  return std::isnan(x);
+}
+
+int isfinite(double x) {
+  return std::isfinite(x);
+}
+#endif
 
 namespace v8 {
 
@@ -61,6 +72,10 @@ bool Value::IsFalse() const {
 
 bool Value::IsString() const {
   return IsOfType(this, JsValueType::JsString);
+}
+
+bool Value::IsSymbol() const {
+  return IsOfType(this, JsValueType::JsSymbol);
 }
 
 bool Value::IsFunction() const {
@@ -158,9 +173,9 @@ bool Value::IsUint32() const {
 }
 
 #define IS_TYPE_FUNCTION(v8ValueFunc, chakrashimFunc) \
-bool Value::##v8ValueFunc##() const { \
+bool Value::v8ValueFunc() const { \
 JsValueRef resultRef = JS_INVALID_REFERENCE; \
-JsErrorCode errorCode = jsrt::Call##chakrashimFunc##( \
+JsErrorCode errorCode = jsrt::Call##chakrashimFunc( \
   const_cast<Value*>(this), &resultRef); \
 if (errorCode != JsNoError) { \
   return false; \
@@ -180,6 +195,12 @@ IS_TYPE_FUNCTION(IsStringObject, isStringObject)
 IS_TYPE_FUNCTION(IsNumberObject, isNumberObject)
 IS_TYPE_FUNCTION(IsMapIterator, isMapIterator)
 IS_TYPE_FUNCTION(IsSetIterator, isSetIterator)
+IS_TYPE_FUNCTION(IsArgumentsObject, isArgumentsObject)
+IS_TYPE_FUNCTION(IsGeneratorObject, isGeneratorObject)
+IS_TYPE_FUNCTION(IsWeakMap, isWeakMap)
+IS_TYPE_FUNCTION(IsWeakSet, isWeakSet)
+IS_TYPE_FUNCTION(IsSymbolObject, isSymbolObject)
+IS_TYPE_FUNCTION(IsName, isName)
 
 MaybeLocal<Boolean> Value::ToBoolean(Local<Context> context) const {
   JsValueRef value;

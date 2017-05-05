@@ -1,3 +1,24 @@
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 #ifndef SRC_ENV_INL_H_
 #define SRC_ENV_INL_H_
 
@@ -178,6 +199,7 @@ inline Environment::Environment(IsolateData* isolate_data,
 #endif
       handle_cleanup_waiting_(0),
       http_parser_buffer_(nullptr),
+      fs_stats_field_array_(),
       context_(context->GetIsolate(), context) {
   // We'll be creating new objects so make sure we've entered the context.
   v8::HandleScope handle_scope(isolate());
@@ -194,6 +216,8 @@ inline Environment::Environment(IsolateData* isolate_data,
 
   RB_INIT(&cares_task_list_);
   AssignToContext(context);
+
+  destroy_ids_list_.reserve(512);
 }
 
 inline Environment::~Environment() {
@@ -207,6 +231,21 @@ inline Environment::~Environment() {
 
   while (handle_cleanup_waiting_ != 0)
     uv_run(event_loop(), UV_RUN_ONCE);
+
+  // Closing the destroy_ids_idle_handle_ within the handle cleanup queue
+  // prevents the async wrap destroy hook from being called.
+  uv_handle_t* handle =
+    reinterpret_cast<uv_handle_t*>(&destroy_ids_idle_handle_);
+  handle->data = this;
+  handle_cleanup_waiting_ = 1;
+  uv_close(handle, [](uv_handle_t* handle) {
+    static_cast<Environment*>(handle->data)->FinishHandleCleanup(handle);
+  });
+
+  while (handle_cleanup_waiting_ != 0)
+    uv_run(event_loop(), UV_RUN_ONCE);
+
+  fs_stats_field_array_.Empty();
 
   context()->SetAlignedPointerInEmbedderData(kContextEmbedderDataIndex,
                                              nullptr);
@@ -245,6 +284,15 @@ inline uv_check_t* Environment::immediate_check_handle() {
 
 inline uv_idle_t* Environment::immediate_idle_handle() {
   return &immediate_idle_handle_;
+}
+
+inline Environment* Environment::from_destroy_ids_idle_handle(
+    uv_idle_t* handle) {
+  return ContainerOf(&Environment::destroy_ids_idle_handle_, handle);
+}
+
+inline uv_idle_t* Environment::destroy_ids_idle_handle() {
+  return &destroy_ids_idle_handle_;
 }
 
 inline void Environment::RegisterHandleCleanup(uv_handle_t* handle,
@@ -301,22 +349,26 @@ inline int64_t Environment::get_async_wrap_uid() {
   return ++async_wrap_uid_;
 }
 
-inline uint32_t* Environment::heap_statistics_buffer() const {
+inline std::vector<int64_t>* Environment::destroy_ids_list() {
+  return &destroy_ids_list_;
+}
+
+inline double* Environment::heap_statistics_buffer() const {
   CHECK_NE(heap_statistics_buffer_, nullptr);
   return heap_statistics_buffer_;
 }
 
-inline void Environment::set_heap_statistics_buffer(uint32_t* pointer) {
+inline void Environment::set_heap_statistics_buffer(double* pointer) {
   CHECK_EQ(heap_statistics_buffer_, nullptr);  // Should be set only once.
   heap_statistics_buffer_ = pointer;
 }
 
-inline uint32_t* Environment::heap_space_statistics_buffer() const {
+inline double* Environment::heap_space_statistics_buffer() const {
   CHECK_NE(heap_space_statistics_buffer_, nullptr);
   return heap_space_statistics_buffer_;
 }
 
-inline void Environment::set_heap_space_statistics_buffer(uint32_t* pointer) {
+inline void Environment::set_heap_space_statistics_buffer(double* pointer) {
   CHECK_EQ(heap_space_statistics_buffer_, nullptr);  // Should be set only once.
   heap_space_statistics_buffer_ = pointer;
 }
@@ -329,6 +381,16 @@ inline char* Environment::http_parser_buffer() const {
 inline void Environment::set_http_parser_buffer(char* buffer) {
   CHECK_EQ(http_parser_buffer_, nullptr);  // Should be set only once.
   http_parser_buffer_ = buffer;
+}
+
+inline v8::Local<v8::Float64Array> Environment::fs_stats_field_array() const {
+  return v8::Local<v8::Float64Array>::New(isolate_, fs_stats_field_array_);
+}
+
+inline void Environment::set_fs_stats_field_array(
+    v8::Local<v8::Float64Array> fields) {
+  CHECK_EQ(fs_stats_field_array_.IsEmpty(), true);  // Should be set only once.
+  fs_stats_field_array_ = v8::Global<v8::Float64Array>::New(isolate_, fields);
 }
 
 inline Environment* Environment::from_cares_timer_handle(uv_timer_t* handle) {
@@ -356,39 +418,23 @@ inline IsolateData* Environment::isolate_data() const {
   return isolate_data_;
 }
 
-// this would have been a template function were it not for the fact that g++
-// sometimes fails to resolve it...
-#define THROW_ERROR(fun)                                                      \
-  do {                                                                        \
-    v8::HandleScope scope(isolate);                                           \
-    isolate->ThrowException(fun(OneByteString(isolate, errmsg)));             \
-  }                                                                           \
-  while (0)
-
-inline void Environment::ThrowError(v8::Isolate* isolate, const char* errmsg) {
-  THROW_ERROR(v8::Exception::Error);
-}
-
-inline void Environment::ThrowTypeError(v8::Isolate* isolate,
-                                        const char* errmsg) {
-  THROW_ERROR(v8::Exception::TypeError);
-}
-
-inline void Environment::ThrowRangeError(v8::Isolate* isolate,
-                                         const char* errmsg) {
-  THROW_ERROR(v8::Exception::RangeError);
-}
-
 inline void Environment::ThrowError(const char* errmsg) {
-  ThrowError(isolate(), errmsg);
+  ThrowError(v8::Exception::Error, errmsg);
 }
 
 inline void Environment::ThrowTypeError(const char* errmsg) {
-  ThrowTypeError(isolate(), errmsg);
+  ThrowError(v8::Exception::TypeError, errmsg);
 }
 
 inline void Environment::ThrowRangeError(const char* errmsg) {
-  ThrowRangeError(isolate(), errmsg);
+  ThrowError(v8::Exception::RangeError, errmsg);
+}
+
+inline void Environment::ThrowError(
+    v8::Local<v8::Value> (*fun)(v8::Local<v8::String>),
+    const char* errmsg) {
+  v8::HandleScope handle_scope(isolate());
+  isolate()->ThrowException(fun(OneByteString(isolate(), errmsg)));
 }
 
 inline void Environment::ThrowErrnoException(int errorno,
@@ -459,9 +505,9 @@ inline v8::Local<v8::Object> Environment::NewInternalFieldObject() {
   return m_obj.ToLocalChecked();
 }
 
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline                                                                      \
   v8::Local<TypeName> IsolateData::PropertyName(v8::Isolate* isolate) const { \
     /* Strings are immutable so casting away const-ness here is okay. */      \
@@ -473,9 +519,9 @@ inline v8::Local<v8::Object> Environment::NewInternalFieldObject() {
 #undef VS
 #undef VP
 
-#define VP(PropertyName, StringValue) V(v8::Private, PropertyName, StringValue)
-#define VS(PropertyName, StringValue) V(v8::String, PropertyName, StringValue)
-#define V(TypeName, PropertyName, StringValue)                                \
+#define VP(PropertyName, StringValue) V(v8::Private, PropertyName)
+#define VS(PropertyName, StringValue) V(v8::String, PropertyName)
+#define V(TypeName, PropertyName)                                             \
   inline v8::Local<TypeName> Environment::PropertyName() const {              \
     return isolate_data()->PropertyName(isolate());                           \
   }

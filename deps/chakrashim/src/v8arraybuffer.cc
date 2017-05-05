@@ -46,7 +46,7 @@ struct ArrayBufferFinalizeInfo {
   }
 };
 
-static void CALLBACK ExternalArrayBufferFinalizeCallback(void *data) {
+static void CHAKRA_CALLBACK ExternalArrayBufferFinalizeCallback(void *data) {
     static_cast<ArrayBufferFinalizeInfo*>(data)->Free();
 }
 
@@ -57,7 +57,8 @@ Local<ArrayBuffer> ArrayBuffer::New(Isolate* isolate,
   ArrayBufferFinalizeInfo* callbackState = nullptr;
 
   if (mode == ArrayBufferCreationMode::kInternalized) {
-      ArrayBufferFinalizeInfo info = { g_arrayBufferAllocator,
+      ArrayBufferFinalizeInfo info = {
+          jsrt::IsolateShim::FromIsolate(isolate)->arrayBufferAllocator,
                                        data,
                                        byte_length };
       finalizeCallback = ExternalArrayBufferFinalizeCallback;
@@ -103,6 +104,24 @@ ArrayBuffer::Contents ArrayBuffer::GetContents() {
   contents.data_ = buffer;
   contents.byte_length_ = bufferLength;
   return contents;
+}
+
+// ENABLE_TTD
+void ArrayBuffer::TTDRawBufferNotifyRegisterForModification(
+  byte* initialModPosition) {
+  JsTTDRawBufferAsyncModificationRegister(this, initialModPosition);
+}
+
+void ArrayBuffer::TTDRawBufferAsyncModifyComplete(byte* finalModPosition) {
+  JsTTDRawBufferAsyncModifyComplete(finalModPosition);
+}
+void ArrayBuffer::TTDRawBufferModifyNotifySync(UINT32 index, UINT32 count) {
+  JsTTDRawBufferModifySyncIndirect(this, index, count);
+}
+void ArrayBuffer::TTDRawBufferCopyNotify(Local<ArrayBuffer> dst,
+                                         UINT32 dstindex, Local<ArrayBuffer> src,
+                                         UINT32 srcIndex, UINT32 count) {
+  JsTTDRawBufferCopySyncIndirect(*dst, dstindex, *src, srcIndex, count);
 }
 
 ArrayBuffer* ArrayBuffer::Cast(Value* obj) {

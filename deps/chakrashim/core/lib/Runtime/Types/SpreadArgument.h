@@ -9,10 +9,8 @@ namespace Js
     class SpreadArgument : public DynamicObject
     {
     private:
-        Var iterable;
-        RecyclableObject* iterator;
         typedef JsUtil::List<Var, Recycler> VarList;
-        VarList* iteratorIndices;
+        Field(VarList*) iteratorIndices;
 
         void AssertAndFailFast() { AssertMsg(false, "This function should not be invoked"); Js::Throw::InternalError();}
     protected:
@@ -22,8 +20,7 @@ namespace Js
     public:
         static bool Is(Var aValue);
         static SpreadArgument* FromVar(Var value);
-        SpreadArgument(Var iterable, RecyclableObject* iterator, DynamicType * type);
-        Var GetArgument() const { return iterable; }
+        SpreadArgument(Var iterator, bool useDirectCall, DynamicType * type);
         const Var* GetArgumentSpread() const { return iteratorIndices ? iteratorIndices->GetBuffer() : nullptr; }
         uint GetArgumentSpreadCount()  const { return iteratorIndices ? iteratorIndices->Count() : 0; }
 
@@ -33,6 +30,7 @@ namespace Js
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL DeleteProperty(PropertyId propertyId, PropertyOperationFlags flags) override{ AssertAndFailFast(); return FALSE;};
+        virtual BOOL DeleteProperty(JavascriptString * propertyNameString, PropertyOperationFlags flags) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override { AssertAndFailFast(); return None; };
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override { AssertAndFailFast(); return FALSE; };
@@ -53,7 +51,7 @@ namespace Js
         virtual BOOL SetItem(uint32 index, Var value, PropertyOperationFlags flags) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL DeleteItem(uint32 index, PropertyOperationFlags flags) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL ToPrimitive(JavascriptHint hint, Var* result, ScriptContext * requestContext) override { AssertAndFailFast(); return FALSE; };
-        virtual BOOL GetEnumerator(BOOL enumNonEnumerable, Var* enumerator, ScriptContext* scriptContext, bool preferSnapshotSemantics = true, bool enumSymbols = false) override { AssertAndFailFast(); return FALSE; };
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL SetAccessors(PropertyId propertyId, Var getter, Var setter, PropertyOperationFlags flags = PropertyOperation_None) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL GetAccessors(PropertyId propertyId, Var *getter, Var *setter, ScriptContext * requestContext) override { AssertAndFailFast(); return FALSE; };
         virtual BOOL IsWritable(PropertyId propertyId) override { AssertAndFailFast(); return FALSE; };

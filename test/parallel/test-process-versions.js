@@ -2,8 +2,8 @@
 const common = require('../common');
 const assert = require('assert');
 
-var expected_keys = ['ares', 'http_parser', 'modules', 'node',
-                     'uv', 'zlib'];
+const expected_keys = ['ares', 'http_parser', 'modules', 'node',
+                       'uv', 'zlib'];
 expected_keys.push(process.jsEngine);
 
 if (common.hasCrypto) {
@@ -12,6 +12,9 @@ if (common.hasCrypto) {
 
 if (!common.isChakraEngine && typeof Intl !== 'undefined') {
   expected_keys.push('icu');
+  expected_keys.push('cldr');
+  expected_keys.push('tz');
+  expected_keys.push('unicode');
 }
 
 expected_keys.sort();

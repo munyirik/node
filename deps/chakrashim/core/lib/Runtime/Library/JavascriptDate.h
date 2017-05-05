@@ -9,7 +9,7 @@ namespace Js
     class JavascriptDate : public DynamicObject
     {
     protected:
-        DateImplementation m_date;
+        Field(DateImplementation) m_date;
 
         DEFINE_VTABLE_CTOR_MEMBER_INIT(JavascriptDate, DynamicObject, m_date);
         DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptDate);
@@ -132,8 +132,8 @@ namespace Js
         static Var EntryValueOf(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntrySymbolToPrimitive(RecyclableObject* function, CallInfo callInfo, ...);
 
-        static JavascriptString* ToLocaleString(JavascriptDate* date);
-        static JavascriptString* ToString(JavascriptDate* date);
+        static JavascriptString* ToLocaleString(JavascriptDate* date, ScriptContext* requestContext);
+        static JavascriptString* ToString(JavascriptDate* date, ScriptContext* requestContext);
 
         virtual BOOL ToPrimitive(JavascriptHint hint, Var* result, ScriptContext * requestContext) override;
         virtual BOOL GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;

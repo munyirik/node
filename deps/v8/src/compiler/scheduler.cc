@@ -11,10 +11,10 @@
 #include "src/compiler/common-operator.h"
 #include "src/compiler/control-equivalence.h"
 #include "src/compiler/graph.h"
-#include "src/compiler/node.h"
 #include "src/compiler/node-marker.h"
 #include "src/compiler/node-properties.h"
-#include "src/zone-containers.h"
+#include "src/compiler/node.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -324,6 +324,10 @@ class CFGBuilder : public ZoneObject {
       case IrOpcode::kSwitch:
         BuildBlocksForSuccessors(node);
         break;
+#define BUILD_BLOCK_JS_CASE(Name) case IrOpcode::k##Name:
+        JS_OP_LIST(BUILD_BLOCK_JS_CASE)
+// JS opcodes are just like calls => fall through.
+#undef BUILD_BLOCK_JS_CASE
       case IrOpcode::kCall:
         if (NodeProperties::IsExceptionalCall(node)) {
           BuildBlocksForSuccessors(node);
@@ -364,6 +368,10 @@ class CFGBuilder : public ZoneObject {
         scheduler_->UpdatePlacement(node, Scheduler::kFixed);
         ConnectThrow(node);
         break;
+#define CONNECT_BLOCK_JS_CASE(Name) case IrOpcode::k##Name:
+        JS_OP_LIST(CONNECT_BLOCK_JS_CASE)
+// JS opcodes are just like calls => fall through.
+#undef CONNECT_BLOCK_JS_CASE
       case IrOpcode::kCall:
         if (NodeProperties::IsExceptionalCall(node)) {
           scheduler_->UpdatePlacement(node, Scheduler::kFixed);
